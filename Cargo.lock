@@ -120,8 +120,13 @@ dependencies = [
 name = "agent_desk_core"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "escargot",
+ "log",
  "serde",
  "serde_json",
+ "smol",
+ "tempfile",
  "uuid",
 ]
 
@@ -1484,6 +1489,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "escargot"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "189159de09e965c688ce1bfae3d974b8fc6826e2eaefcb6e0d40f337ec98492b"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "etagere"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1541,6 +1557,9 @@ dependencies = [
 [[package]]
 name = "fake-claude"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "fastrand"

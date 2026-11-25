@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-channel = "2.5.0"
+log = "0.4.35"
 serde.workspace = true
 serde_json.workspace = true
+smol = "2.0.2"
 uuid = { version = "1.29.3", features = ["v4"] }
+
+[dev-dependencies]
+escargot = "1.0.1"
+tempfile = "3.27.0"
