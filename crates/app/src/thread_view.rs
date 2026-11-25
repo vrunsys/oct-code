@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use agent_desk_core::thread::{Item, ThreadId, ToolOutcome};
+use agent_desk_core::thread::{ApprovalState, Item, ThreadId, ToolOutcome};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
@@ -172,6 +172,12 @@ impl ThreadView {
                 self.render_message("Claude", body, false, cx)
             }
             Item::Thinking(text) => self.render_thinking(ix, text, cx),
+            Item::Approval {
+                request_id,
+                tool_name,
+                input,
+                state,
+            } => self.render_approval(&request_id, &tool_name, &input, state, cx),
             Item::Tool {
                 id,
                 name,
@@ -254,6 +260,97 @@ impl ThreadView {
                         .child(assistant_markdown(self.message_id(ix), text)),
                 )
             })
+            .into_any_element()
+    }
+
+    /// A pending request is a card with Allow and Deny; once decided it
+    /// becomes a quiet row like a tool call's.
+    fn render_approval(
+        &self,
+        request_id: &str,
+        tool_name: &str,
+        input: &Value,
+        state: ApprovalState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let summary = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_xs()
+            .font_family(theme.mono_font_family.clone())
+            .text_color(theme.muted_foreground)
+            .child(tool_summary(tool_name, input));
+
+        let decided = match state {
+            ApprovalState::Pending => None,
+            ApprovalState::Allowed => Some((IconName::Check, theme.success, "Allowed")),
+            ApprovalState::Denied => Some((IconName::CircleX, theme.danger, "Denied")),
+        };
+        if let Some((icon, color, label)) = decided {
+            return h_flex()
+                .gap_2()
+                .min_w_0()
+                .px_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.foreground)
+                        .child(tool_name.to_owned()),
+                )
+                .child(summary)
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::new(icon).xsmall().text_color(color))
+                        .child(label),
+                )
+                .into_any_element();
+        }
+
+        let decide = |allow: bool| {
+            let app = self.app.clone();
+            let request_id = request_id.to_owned();
+            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
+                app.update(cx, |app, cx| app.approve(&request_id, allow, cx));
+            }
+        };
+        v_flex()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .bg(theme.background)
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(format!("Allow Claude to use {tool_name}?")),
+            )
+            .child(h_flex().min_w_0().child(summary))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("allow-{request_id}")))
+                            .primary()
+                            .small()
+                            .label("Allow")
+                            .on_click(decide(true)),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("deny-{request_id}")))
+                            .outline()
+                            .small()
+                            .label("Deny")
+                            .on_click(decide(false)),
+                    ),
+            )
             .into_any_element()
     }
 

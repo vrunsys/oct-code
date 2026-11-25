@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod claude;
 pub mod detect;
 mod platform;

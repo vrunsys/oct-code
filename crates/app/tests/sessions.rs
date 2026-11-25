@@ -4,11 +4,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod support;
+
 use agent_desk::app_state::AppState;
 use agent_desk_core::store::ThreadStore;
 use agent_desk_core::thread::{Item, Thread, ThreadId, ThreadStatus};
 use agent_desk_test_support::{fake_claude_path, write_model_catalog};
 use gpui_kit::{AppContext as _, Entity, TestAppContext};
+use support::test_approver;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -39,7 +42,7 @@ impl Fixture {
         cx.executor().allow_parking();
         let root = self.root.path().to_path_buf();
         let home = Some(self.claude_home.path().to_path_buf());
-        cx.new(|_| AppState::load_with_history(root, claude, home))
+        cx.new(|_| AppState::load_with_history(root, claude, home).with_approver(test_approver()))
     }
 
     /// A loaded app with fake-claude, this project and one selected thread.

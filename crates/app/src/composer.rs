@@ -1,9 +1,9 @@
-//! The message box under a thread: the text, then the model picker and Send
-//! on the trailing edge.
+//! The message box under a thread: the text, then the permission mode, the
+//! model picker and Send on the trailing edge.
 //! Enter sends; Shift+Enter adds a line.
 
 use agent_desk_core::claude::catalog::ModelCatalog;
-use agent_desk_core::thread::{ThreadId, ThreadStatus};
+use agent_desk_core::thread::{PermissionMode, ThreadId, ThreadStatus};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::popover::Popover;
@@ -94,6 +94,41 @@ const MODEL_COLUMN_REM: f32 = 11.;
 const REASONING_COLUMN_REM: f32 = 14.;
 
 impl Composer {
+    /// Whether Claude asks before using tools. One click switches; Full
+    /// access is tinted as a warning so it is never on unnoticed. Disabled
+    /// while a turn runs, because a change restarts the session.
+    fn render_mode_toggle(&self, is_busy: bool, cx: &Context<Self>) -> AnyElement {
+        let thread = self.app.read(cx).selected_thread();
+        let mode = thread.map_or(PermissionMode::default(), |thread| thread.permission_mode);
+        let (label, tooltip, next) = match mode {
+            PermissionMode::Supervised => (
+                "Supervised",
+                "Claude asks before using tools. Click to give Full access",
+                PermissionMode::FullAccess,
+            ),
+            PermissionMode::FullAccess => (
+                "Full access",
+                "Claude uses tools without asking. Click to supervise",
+                PermissionMode::Supervised,
+            ),
+        };
+        let toggle = Button::new("permission-mode")
+            .ghost()
+            .xsmall()
+            .label(label)
+            .tooltip(tooltip)
+            .when(mode == PermissionMode::FullAccess, |this| {
+                this.text_color(cx.theme().warning)
+            });
+        let Some(id) = thread.map(|thread| thread.id.clone()).filter(|_| !is_busy) else {
+            return toggle.disabled(true).into_any_element();
+        };
+        let app = self.app.clone();
+        toggle
+            .on_click(move |_, _, cx| app.update(cx, |app, cx| app.set_mode(&id, next, cx)))
+            .into_any_element()
+    }
+
     /// The thread's model and reasoning level, side by side in one popover,
     /// both from Claude Code's catalog. It stays open while you choose, so a
     /// model and its level can be picked in one go. Disabled while a turn
@@ -306,6 +341,7 @@ impl Render for Composer {
                     h_flex()
                         .justify_end()
                         .gap_2()
+                        .child(self.render_mode_toggle(is_busy, cx))
                         .child(self.render_model_picker(is_busy, cx))
                         .child(
                             Button::new("send")

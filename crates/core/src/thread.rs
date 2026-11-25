@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::approval::ApprovalRequest;
 use crate::claude::AgentEvent;
 
 const UNTITLED: &str = "New thread";
@@ -33,6 +34,23 @@ pub enum ThreadStatus {
     Failed(String),
 }
 
+/// Whether Claude asks before using tools in a thread.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionMode {
+    /// Each tool use that Claude Code would ask about waits for Allow or Deny.
+    #[default]
+    Supervised,
+    /// Claude uses every tool without asking.
+    FullAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalState {
+    Pending,
+    Allowed,
+    Denied,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolOutcome {
     Ok(String),
@@ -45,6 +63,13 @@ pub enum Item {
     Assistant(String),
     /// A summary of Claude's thinking, shown before what it led to.
     Thinking(String),
+    /// Claude asked to use a tool and waits for the person to decide.
+    Approval {
+        request_id: String,
+        tool_name: String,
+        input: Value,
+        state: ApprovalState,
+    },
     Tool {
         id: String,
         name: String,
@@ -71,6 +96,9 @@ pub struct Thread {
     /// The reasoning effort chosen for this thread; `None` uses the model's default.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Threads saved before modes existed load as supervised.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
     /// Whether the last item is text or thinking Claude is still writing.
     #[serde(skip)]
     streaming: bool,
@@ -89,6 +117,7 @@ impl Thread {
             created_at: unix_millis_now(),
             model: None,
             effort: None,
+            permission_mode: PermissionMode::default(),
             streaming: false,
         }
     }
@@ -153,6 +182,50 @@ impl Thread {
             }
             AgentEvent::Unknown { .. } => {}
         }
+    }
+
+    /// Shows Claude's request to use a tool, waiting for a decision.
+    pub fn push_approval(&mut self, request: &ApprovalRequest) {
+        self.push_finished(Item::Approval {
+            request_id: request.request_id.clone(),
+            tool_name: request.tool_name.clone(),
+            input: request.input.clone(),
+            state: ApprovalState::Pending,
+        });
+    }
+
+    /// Records the decision on a pending request. Returns `false` when there
+    /// is no such request or it was already decided.
+    pub fn resolve_approval(&mut self, request_id: &str, allowed: bool) -> bool {
+        let pending = self.items.iter_mut().rev().find_map(|item| match item {
+            Item::Approval {
+                request_id: id,
+                state: state @ ApprovalState::Pending,
+                ..
+            } if id == request_id => Some(state),
+            _ => None,
+        });
+        let Some(state) = pending else {
+            return false;
+        };
+        *state = if allowed {
+            ApprovalState::Allowed
+        } else {
+            ApprovalState::Denied
+        };
+        true
+    }
+
+    /// Request ids of the approvals still waiting for a decision.
+    pub fn pending_approvals(&self) -> impl Iterator<Item = &str> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Approval {
+                request_id,
+                state: ApprovalState::Pending,
+                ..
+            } => Some(request_id.as_str()),
+            _ => None,
+        })
     }
 
     /// Adds a piece to the open block of the same kind, or opens one.

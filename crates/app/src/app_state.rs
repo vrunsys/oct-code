@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
+use agent_desk_core::approval::{
+    APPROVE_TOOL, ApprovalDecision, ApprovalReply, ApprovalRequest, ApproverEndpoint,
+};
 use agent_desk_core::claude::catalog::{self, ModelCatalog};
 use agent_desk_core::claude::history::{self, HistoryEntry, HistorySession, HistoryWatcher};
 use agent_desk_core::claude::{
@@ -19,7 +22,7 @@ use agent_desk_core::claude::{
 use agent_desk_core::detect::{AgentStatus, detect_claude};
 use agent_desk_core::settings::{Appearance, Settings};
 use agent_desk_core::store::{Project, ProjectList, ThreadStore};
-use agent_desk_core::thread::{Thread, ThreadId, ThreadStatus};
+use agent_desk_core::thread::{Item, PermissionMode, Thread, ThreadId, ThreadStatus};
 use gpui_kit::{AppContext as _, Context, Task};
 
 /// The binary name used when detection found nothing and no override is set;
@@ -30,6 +33,9 @@ const DEFAULT_CLAUDE_BINARY: &str = "claude";
 /// How often Claude Code's history is checked for turns and sessions added
 /// outside Agent Desk. A check only reads the files that changed.
 const HISTORY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Approval requests from the server, each with its reply.
+pub type ApprovalRequests = async_channel::Receiver<(ApprovalRequest, ApprovalReply)>;
 
 /// A running Claude process for one thread.
 struct LiveSession {
@@ -61,6 +67,13 @@ pub struct AppState {
     history_watch: Option<Task<()>>,
     /// Counts the times a thread's items were replaced rather than added to.
     rewrites: u64,
+    /// How Claude reaches this app for approvals; supervised threads can't
+    /// start without it.
+    approver: Option<ApproverEndpoint>,
+    /// Requests waiting for the person, by request id.
+    pending_approvals: HashMap<String, (ThreadId, ApprovalReply)>,
+    /// Feeds approval requests in while the app runs; dropped with it.
+    approval_listener: Option<Task<()>>,
 }
 
 impl AppState {
@@ -80,9 +93,14 @@ impl AppState {
         let store = ThreadStore::new(root.clone());
         let mut threads = store.load_all();
         for thread in &mut threads {
-            // No agent process survives a restart.
+            // No agent process survives a restart, and neither does anyone
+            // waiting for an approval.
             if thread.status == ThreadStatus::Running {
                 thread.status = ThreadStatus::Idle;
+            }
+            let pending: Vec<String> = thread.pending_approvals().map(str::to_owned).collect();
+            for request_id in pending {
+                thread.resolve_approval(&request_id, false);
             }
         }
         Self {
@@ -104,7 +122,16 @@ impl AppState {
             history_home,
             history_watch: None,
             rewrites: 0,
+            approver: None,
+            pending_approvals: HashMap::new(),
+            approval_listener: None,
         }
+    }
+
+    /// Lets supervised threads ask this app before Claude uses a tool.
+    pub fn with_approver(mut self, approver: ApproverEndpoint) -> Self {
+        self.approver = Some(approver);
+        self
     }
 
     /// The models and reasoning levels on offer, from Claude Code's own
@@ -288,14 +315,31 @@ impl AppState {
             return false;
         }
         let fresh = thread_from_history(&thread.project, session);
-        if fresh.items == thread.items {
+        // Approvals live only here; Claude's history has the rest.
+        let recorded: Vec<&Item> = thread
+            .items
+            .iter()
+            .filter(|item| !matches!(item, Item::Approval { .. }))
+            .collect();
+        let recorded_len = recorded.len();
+        let is_extension = fresh.items.len() >= recorded_len
+            && fresh
+                .items
+                .iter()
+                .zip(recorded)
+                .all(|(new, old)| new == old);
+        if is_extension && fresh.items.len() == recorded_len {
             return false;
         }
-        if !fresh.items.starts_with(&thread.items) {
-            self.rewrites += 1;
-        }
         let thread = &mut self.threads[ix];
-        thread.items = fresh.items;
+        if is_extension {
+            let added = fresh.items.into_iter().skip(recorded_len);
+            thread.items.extend(added);
+        } else {
+            // History disagrees with what is shown; it wins.
+            self.rewrites += 1;
+            thread.items = fresh.items;
+        }
         thread.title = fresh.title;
         // Newer turns supersede how the last one here ended.
         thread.status = fresh.status;
@@ -359,6 +403,7 @@ impl AppState {
 
     /// Stops the thread's Claude process. A turn in progress ends as "Stopped".
     pub fn stop(&mut self, id: &ThreadId, cx: &mut Context<Self>) {
+        self.deny_pending(id, "Session stopped", cx);
         // Dropping the last handle kills the process; its late Exited event
         // no longer matches a live generation and is ignored.
         if self.sessions.remove(id).is_none() {
@@ -370,6 +415,100 @@ impl AppState {
             }
             self.save_thread(ix);
         }
+        cx.notify();
+    }
+
+    /// Shows Claude's request to use a tool in its thread until the person
+    /// decides. Requests for threads this app doesn't have are denied.
+    pub fn on_approval_request(
+        &mut self,
+        request: ApprovalRequest,
+        reply: ApprovalReply,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.thread_ix(&request.thread_id) else {
+            reply.send(ApprovalDecision::deny("Unknown thread"));
+            return;
+        };
+        if self.pending_approvals.contains_key(&request.request_id) {
+            reply.send(ApprovalDecision::deny("Duplicate request"));
+            return;
+        }
+        self.threads[ix].push_approval(&request);
+        self.pending_approvals
+            .insert(request.request_id, (request.thread_id, reply));
+        self.save_thread(ix);
+        cx.notify();
+    }
+
+    /// Shows each request from the approval server as it arrives.
+    pub fn listen_for_approvals(&mut self, requests: ApprovalRequests, cx: &mut Context<Self>) {
+        self.approval_listener = Some(cx.spawn(async move |this, cx| {
+            while let Ok((request, reply)) = requests.recv().await {
+                let shown =
+                    this.update(cx, |this, cx| this.on_approval_request(request, reply, cx));
+                if shown.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// The person's decision on a pending request.
+    pub fn approve(&mut self, request_id: &str, allow: bool, cx: &mut Context<Self>) {
+        let Some((thread_id, reply)) = self.pending_approvals.remove(request_id) else {
+            return;
+        };
+        self.resolve(&thread_id, request_id, allow);
+        reply.send(if allow {
+            ApprovalDecision::Allow
+        } else {
+            ApprovalDecision::deny("Denied by user")
+        });
+        cx.notify();
+    }
+
+    /// Denies every request still waiting in the thread.
+    fn deny_pending(&mut self, id: &ThreadId, message: &str, cx: &mut Context<Self>) {
+        let request_ids: Vec<String> = self
+            .pending_approvals
+            .iter()
+            .filter(|(_, (thread_id, _))| thread_id == id)
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        for request_id in request_ids {
+            if let Some((_, reply)) = self.pending_approvals.remove(&request_id) {
+                self.resolve(id, &request_id, false);
+                reply.send(ApprovalDecision::deny(message));
+            }
+        }
+        cx.notify();
+    }
+
+    fn resolve(&mut self, thread_id: &ThreadId, request_id: &str, allow: bool) {
+        if let Some(ix) = self.thread_ix(thread_id)
+            && self.threads[ix].resolve_approval(request_id, allow)
+        {
+            self.save_thread(ix);
+        }
+    }
+
+    /// Sets whether Claude asks before using tools in the thread. A live
+    /// session ends, so the next message restarts with the new mode and
+    /// resumes the same conversation.
+    pub fn set_mode(&mut self, id: &ThreadId, mode: PermissionMode, cx: &mut Context<Self>) {
+        let Some(ix) = self.thread_ix(id) else {
+            return;
+        };
+        if self.threads[ix].permission_mode == mode {
+            return;
+        }
+        self.threads[ix].permission_mode = mode;
+        self.deny_pending(id, "Session stopped", cx);
+        // Dropping the session kills the process; nothing is mid-turn, as the
+        // composer disables the toggle while a turn runs.
+        self.sessions.remove(id);
+        self.save_thread(ix);
         cx.notify();
     }
 
@@ -466,7 +605,7 @@ impl AppState {
                 .effort
                 .clone()
                 .filter(|effort| is_plain_token(effort)),
-            permission: PermissionSetup::FullAccess,
+            permission: self.permission_setup(thread)?,
         };
         let (session, events) = ClaudeSession::start(&config).map_err(|error| match error {
             SessionError::NotFound(_) => {
@@ -527,12 +666,34 @@ impl AppState {
                 }
             }
             SessionEvent::Exited { code, stderr_tail } => {
+                self.deny_pending(id, "Session ended", cx);
                 self.threads[ix].on_exit(code, &stderr_tail);
                 self.sessions.remove(id);
                 self.save_thread(ix);
             }
         }
         cx.notify();
+    }
+
+    /// How the thread's session handles tool permissions. A supervised
+    /// thread never falls back to running unsupervised.
+    fn permission_setup(&self, thread: &Thread) -> Result<PermissionSetup, String> {
+        match thread.permission_mode {
+            PermissionMode::FullAccess => Ok(PermissionSetup::FullAccess),
+            PermissionMode::Supervised => {
+                let approver = self.approver.as_ref().ok_or(
+                    "Approvals aren’t available, so this supervised thread can’t start. \
+                     Restart Agent Desk, or switch the thread to Full access.",
+                )?;
+                let mcp_config = approver
+                    .write_mcp_config(&self.root, &thread.id)
+                    .map_err(|error| format!("Couldn’t set up approvals: {error}"))?;
+                Ok(PermissionSetup::Supervised {
+                    mcp_config,
+                    tool: APPROVE_TOOL.to_owned(),
+                })
+            }
+        }
     }
 
     /// The detected binary, else the override, else the bare name.

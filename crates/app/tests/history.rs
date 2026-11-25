@@ -5,12 +5,15 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod support;
+
 use agent_desk::app_state::AppState;
 use agent_desk_core::claude::history::encode_project_dir;
 use agent_desk_core::thread::{Item, ThreadStatus};
 use agent_desk_test_support::fake_claude_path;
 use gpui_kit::{AppContext as _, Entity, TestAppContext};
 use serde_json::json;
+use support::test_approver;
 
 const SESSION: &str = "10d97801-6bbf-442b-a03d-a252027fea22";
 
@@ -82,7 +85,9 @@ impl Fixture {
     fn load(&self, cx: &mut TestAppContext, claude: Option<PathBuf>) -> Entity<AppState> {
         let root = self.root.path().to_path_buf();
         let home = self.claude_home.path().to_path_buf();
-        cx.new(|_| AppState::load_with_history(root, claude, Some(home)))
+        cx.new(|_| {
+            AppState::load_with_history(root, claude, Some(home)).with_approver(test_approver())
+        })
     }
 }
 
@@ -267,4 +272,46 @@ fn a_thread_running_here_is_not_overwritten_from_history(cx: &mut TestAppContext
         items_of(cx, &app, "fake-session-1"),
         [Item::User("hi".into()), Item::Assistant("echo: hi".into())]
     );
+}
+
+#[gpui_kit::test]
+fn approvals_survive_a_refresh_from_history(cx: &mut TestAppContext) {
+    use agent_desk_core::approval::{ApprovalReply, ApprovalRequest};
+    use agent_desk_core::thread::ApprovalState;
+
+    let fixture = Fixture::new();
+    let app = fixture.load(cx, Some(fixture.root.path().join("no-claude")));
+    let project = fixture.project.clone();
+    app.update(cx, |app, cx| app.add_project(&project, cx));
+    cx.run_until_parked();
+    // An approval decided here; Claude's history never records these.
+    let id = app.read_with(cx, |app, _| app.threads()[0].id.clone());
+    let (reply, _decided) = ApprovalReply::channel();
+    app.update(cx, |app, cx| {
+        let request = ApprovalRequest {
+            request_id: "r1".into(),
+            thread_id: id.clone(),
+            tool_name: "Bash".into(),
+            input: json!({"command": "ls"}),
+        };
+        app.on_approval_request(request, reply, cx);
+        app.approve("r1", true, cx);
+        app.watch_history(cx);
+    });
+    cx.run_until_parked();
+
+    fixture.append_turn(SESSION, "and now?", "Three files.");
+    after_next_poll(cx);
+    let items = items_of(cx, &app, SESSION);
+    assert!(
+        items.iter().any(|item| matches!(
+            item,
+            Item::Approval {
+                state: ApprovalState::Allowed,
+                ..
+            }
+        )),
+        "{items:#?}"
+    );
+    assert_eq!(items.last(), Some(&Item::Assistant("Three files.".into())));
 }

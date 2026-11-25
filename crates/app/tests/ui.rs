@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::Path;
 
+mod support;
+
 use agent_desk::app_state::AppState;
 use agent_desk::workspace_view::{WorkspaceView, new_thread_button_id};
 use agent_desk_core::store::ProjectList;
@@ -13,6 +15,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, Entity, TestAppContext, WindowBounds, WindowOptions,
     px, size,
 };
+use support::test_approver;
 
 fn open_workspace(root: &Path, cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<AppState>) {
     cx.update(gpui_kit::init);
@@ -166,8 +169,10 @@ fn stop_shortcut_ends_the_live_session(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(agent_desk::theme::install);
     cx.update(agent_desk::actions::bind_keys);
-    let app =
-        cx.new(|_| AppState::load_with_history(root.path().into(), Some(fake_claude_path()), None));
+    let app = cx.new(|_| {
+        AppState::load_with_history(root.path().into(), Some(fake_claude_path()), None)
+            .with_approver(test_approver())
+    });
     let window_app = app.clone();
     let (handle, _) = cx.update(|cx| {
         gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
@@ -262,4 +267,46 @@ fn model_picker_shows_models_and_reasoning_side_by_side(cx: &mut TestAppContext)
     });
     assert_eq!(thread.model.as_deref(), Some("claude-opus-5-5"));
     assert_eq!(thread.effort.as_deref(), Some("high"));
+}
+
+#[gpui_kit::test]
+fn mode_toggle_switches_between_supervised_and_full_access(cx: &mut TestAppContext) {
+    use agent_desk_core::thread::PermissionMode;
+
+    let root = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    fs::create_dir(work.path().join("repo")).unwrap();
+    let project = ProjectList::load(root.path().into())
+        .add(&work.path().join("repo"))
+        .unwrap()
+        .path;
+    let (handle, app) = open_workspace(root.path(), cx);
+    let id = app.update(cx, |app, cx| app.new_thread(&project, cx));
+    let mode = |cx: &mut TestAppContext| {
+        app.read_with(cx, |app, _| {
+            app.threads()
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .permission_mode
+        })
+    };
+    assert_eq!(mode(cx), PermissionMode::Supervised);
+
+    for expected in [PermissionMode::FullAccess, PermissionMode::Supervised] {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            // The toggle sits with the composer's other controls, before the picker.
+            let toggle = window.find("permission-mode").bounds();
+            let picker = window.find("model-picker").bounds();
+            assert!(
+                toggle.right() <= picker.left(),
+                "toggle is left of the picker"
+            );
+            window.click("permission-mode", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(mode(cx), expected);
+    }
 }

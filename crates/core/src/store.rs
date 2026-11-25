@@ -93,7 +93,7 @@ fn load_thread(path: &Path) -> io::Result<Thread> {
 }
 
 /// Thread ids are UUIDs; anything else could name a path outside the store.
-fn is_safe_file_stem(stem: &str) -> bool {
+pub(crate) fn is_safe_file_stem(stem: &str) -> bool {
     !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
