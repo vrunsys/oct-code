@@ -1,5 +1,6 @@
 //! The message box under a thread. Enter sends; Shift+Enter adds a line.
 
+use agent_desk_core::thread::ThreadStatus;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
@@ -29,6 +30,8 @@ impl Composer {
                 .submit_on_enter(true)
         });
         let subscriptions = vec![
+            // Re-render when the thread starts or finishes a turn.
+            cx.observe(&app, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
                 InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
                 // Re-render so Send enables and disables with the text.
@@ -51,7 +54,18 @@ impl Composer {
         self.input.read(cx).value().trim().to_owned()
     }
 
+    /// Whether the selected thread is mid-turn; the composer waits for it.
+    fn is_busy(&self, cx: &Context<Self>) -> bool {
+        self.app
+            .read(cx)
+            .selected_thread()
+            .is_some_and(|thread| thread.status == ThreadStatus::Running)
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_busy(cx) {
+            return;
+        }
         let text = self.draft(cx);
         let Some(id) = self.app.read(cx).selected().cloned() else {
             return;
@@ -71,6 +85,7 @@ impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let is_empty = self.draft(cx).is_empty();
+        let is_busy = self.is_busy(cx);
         content_column().pb_4().child(
             v_flex()
                 .gap_2()
@@ -82,6 +97,7 @@ impl Render for Composer {
                 .child(
                     Textarea::new(&self.input)
                         .appearance(false)
+                        .disabled(is_busy)
                         .aria_label("Message"),
                 )
                 .child(
@@ -100,7 +116,7 @@ impl Render for Composer {
                                 .primary()
                                 .small()
                                 .label("Send")
-                                .disabled(is_empty)
+                                .disabled(is_empty || is_busy)
                                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                         ),
                 ),

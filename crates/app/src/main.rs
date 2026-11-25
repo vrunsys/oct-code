@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use agent_desk::actions;
 use agent_desk::app_state::AppState;
-use agent_desk::appearance::Appearance;
+use agent_desk::appearance::appearance_from_env;
 use agent_desk::workspace_view::WorkspaceView;
 use agent_desk_core::store::default_root;
 use gpui_kit::{AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
@@ -15,7 +15,7 @@ const CLAUDE_BIN_ENV: &str = "AGENT_DESK_CLAUDE_BIN";
 fn main() {
     let claude_override = std::env::var_os(CLAUDE_BIN_ENV).map(PathBuf::from);
     let root = default_root();
-    let appearance = Appearance::from_env();
+    let appearance_override = appearance_from_env();
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
@@ -39,7 +39,7 @@ fn main() {
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
                 let app = cx.new(|_| AppState::load(root, claude_override));
-                cx.new(|cx| WorkspaceView::new(app, appearance, window, cx))
+                cx.new(|cx| WorkspaceView::new(app, appearance_override, window, cx))
             })
             .expect("failed to open the Agent Desk window");
         });

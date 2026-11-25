@@ -114,6 +114,7 @@ name = "agent-desk"
 version = "0.1.0"
 dependencies = [
  "agent_desk_core",
+ "agent_desk_test_support",
  "async-channel",
  "gpui-kit",
  "log",
@@ -125,10 +126,10 @@ dependencies = [
 name = "agent_desk_core"
 version = "0.1.0"
 dependencies = [
+ "agent_desk_test_support",
  "async-channel",
  "dirs 7.0.0",
  "dunce",
- "escargot",
  "log",
  "serde",
  "serde_json",
@@ -136,6 +137,14 @@ dependencies = [
  "tempfile",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "agent_desk_test_support"
+version = "0.1.0"
+dependencies = [
+ "escargot",
+ "smol",
 ]
 
 [[package]]

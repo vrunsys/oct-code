@@ -1,12 +1,10 @@
-mod support;
-
 use std::path::PathBuf;
 
 use agent_desk_core::claude::{
     AgentEvent, ClaudeConfig, ClaudeSession, PermissionSetup, SessionError, SessionEvent,
 };
+use agent_desk_test_support::{block_on_timeout, fake_claude_path};
 use async_channel::Receiver;
-use support::{block_on_timeout, fake_claude_path};
 
 fn config(cwd: PathBuf, resume: Option<&str>) -> ClaudeConfig {
     ClaudeConfig {

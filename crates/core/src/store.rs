@@ -198,7 +198,7 @@ impl ProjectList {
 }
 
 /// Writes `bytes` to `<path>.tmp`, flushes it to disk, then renames it over `path`.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
     }

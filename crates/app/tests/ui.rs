@@ -5,7 +5,6 @@ use std::fs;
 use std::path::Path;
 
 use agent_desk::app_state::AppState;
-use agent_desk::appearance::Appearance;
 use agent_desk::workspace_view::{WorkspaceView, new_thread_button_id};
 use agent_desk_core::store::ProjectList;
 use agent_desk_core::thread::Item;
@@ -32,9 +31,7 @@ fn open_workspace(root: &Path, cx: &mut TestAppContext) -> (AnyWindowHandle, Ent
                 ..Default::default()
             },
             cx,
-            move |window, cx| {
-                cx.new(|cx| WorkspaceView::new(window_app, Appearance::System, window, cx))
-            },
+            move |window, cx| cx.new(|cx| WorkspaceView::new(window_app, None, window, cx)),
         )
         .expect("open test window")
     });
@@ -111,4 +108,80 @@ fn new_thread_shortcut_creates_a_thread(cx: &mut TestAppContext) {
         assert_eq!(app.threads().len(), 1);
         assert!(app.selected_thread().is_some());
     });
+}
+
+#[gpui_kit::test]
+fn appearance_menu_switches_and_saves_the_theme(cx: &mut TestAppContext) {
+    use agent_desk_core::settings::{Appearance, Settings};
+    use gpui_kit::MouseButton;
+    use gpui_kit::component::Theme;
+    use gpui_kit::test::{TestEventExt, TestQueryExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let (handle, app) = open_workspace(root.path(), cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("appearance", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let dark = window.find_by_label("Dark").bounds().center();
+        window.pointer_down(dark, MouseButton::Left, cx);
+        window.pointer_up(dark, MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        app.read_with(cx, |app, _| app.appearance()),
+        Appearance::Dark
+    );
+    assert!(cx.update(|cx| Theme::global(cx).mode.is_dark()));
+    assert_eq!(Settings::load(root.path()).appearance, Appearance::Dark);
+}
+
+#[gpui_kit::test]
+fn stop_shortcut_ends_the_live_session(cx: &mut TestAppContext) {
+    use agent_desk_test_support::fake_claude_path;
+
+    cx.executor().allow_parking();
+    let root = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    fs::create_dir(work.path().join("repo")).unwrap();
+    let project = ProjectList::load(root.path().into())
+        .add(&work.path().join("repo"))
+        .unwrap()
+        .path;
+
+    cx.update(gpui_kit::init);
+    cx.update(agent_desk::actions::bind_keys);
+    let app = cx.new(|_| AppState::load(root.path().into(), Some(fake_claude_path())));
+    let window_app = app.clone();
+    let (handle, _) = cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+            cx.new(|cx| WorkspaceView::new(window_app, None, window, cx))
+        })
+        .expect("open test window")
+    });
+    let id = app.update(cx, |app, cx| {
+        let id = app.new_thread(&project, cx);
+        app.send_message(&id, "hi".into(), cx);
+        id
+    });
+    assert!(app.read_with(cx, |app, _| app.is_live(&id)));
+
+    let shortcut = if cfg!(target_os = "macos") {
+        "cmd-."
+    } else {
+        "ctrl-."
+    };
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press(shortcut, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(!app.read_with(cx, |app, _| app.is_live(&id)));
 }

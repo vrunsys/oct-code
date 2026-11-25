@@ -1,9 +1,7 @@
-mod support;
-
 use std::fs;
 
 use agent_desk_core::detect::{AgentStatus, Os, detect_claude, detect_in, install_command};
-use support::{fake_claude_path, process_lock};
+use agent_desk_test_support::{fake_claude_path, process_lock};
 
 #[test]
 fn override_to_fake_is_installed() {

@@ -16,12 +16,28 @@ const ADD_PROJECT_KEY: &str = "ctrl-o";
 const NEW_THREAD_KEY: &str = "cmd-n";
 #[cfg(not(target_os = "macos"))]
 const NEW_THREAD_KEY: &str = "ctrl-n";
+// The long-standing "cancel" shortcut on macOS, mirrored with Ctrl elsewhere.
+#[cfg(target_os = "macos")]
+const STOP_THREAD_KEY: &str = "cmd-.";
+#[cfg(not(target_os = "macos"))]
+const STOP_THREAD_KEY: &str = "ctrl-.";
 
-actions!(agent_desk, [AddProject, NewThread]);
+actions!(
+    agent_desk,
+    [
+        AddProject,
+        NewThread,
+        StopThread,
+        UseSystemAppearance,
+        UseLightAppearance,
+        UseDarkAppearance,
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(ADD_PROJECT_KEY, AddProject, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(NEW_THREAD_KEY, NewThread, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new(STOP_THREAD_KEY, StopThread, Some(WORKSPACE_CONTEXT)),
     ]);
 }

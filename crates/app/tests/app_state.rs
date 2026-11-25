@@ -156,3 +156,21 @@ fn load_resets_running_threads_to_idle(cx: &mut TestAppContext) {
         assert_eq!(app.threads()[0].status, ThreadStatus::Idle)
     });
 }
+
+#[gpui_kit::test]
+fn appearance_choice_survives_restart(cx: &mut TestAppContext) {
+    use agent_desk_core::settings::Appearance;
+    let root = tempfile::tempdir().unwrap();
+    let app = load(root.path(), cx);
+    assert_eq!(
+        app.read_with(cx, |app, _| app.appearance()),
+        Appearance::System
+    );
+
+    app.update(cx, |app, cx| app.set_appearance(Appearance::Dark, cx));
+    let reloaded = load(root.path(), cx);
+    assert_eq!(
+        reloaded.read_with(cx, |app, _| app.appearance()),
+        Appearance::Dark
+    );
+}

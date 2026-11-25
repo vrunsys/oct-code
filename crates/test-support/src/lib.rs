@@ -1,8 +1,8 @@
-//! Shared helpers for tests that drive a real child process.
-#![allow(dead_code)]
+//! Helpers for tests that drive real child processes. Test-only: no crate
+//! depends on this outside `[dev-dependencies]`.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 /// Path to the `fake-claude` binary, built once per test process.
@@ -32,7 +32,7 @@ pub fn block_on_timeout<T>(future: impl Future<Output = T>) -> T {
 /// Serializes tests that write an executable and then run one. Without it, a
 /// fork on another thread can inherit the open write handle and make exec
 /// fail with ETXTBSY ("Text file busy") on Linux.
-pub fn process_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub fn process_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

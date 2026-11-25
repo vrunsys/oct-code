@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agent_desk_core::claude::{ClaudeConfig, PermissionSetup, build_args};
+use agent_desk_core::claude::{ClaudeConfig, PermissionSetup, build_args, is_valid_session_id};
 
 fn config(resume: Option<&str>, permission: PermissionSetup) -> ClaudeConfig {
     ClaudeConfig {
@@ -58,4 +58,22 @@ fn supervised_adds_mcp_flags() {
         Some("mcp__desk__approve")
     );
     assert!(!args.iter().any(|a| a == "--permission-mode"));
+}
+
+#[test]
+fn real_session_ids_are_valid() {
+    assert!(is_valid_session_id("0222ee39-2e20-4887-a779-9246dfce7c4f"));
+    assert!(is_valid_session_id("fake-session-1"));
+}
+
+#[test]
+fn ids_that_could_inject_arguments_are_invalid() {
+    // A saved thread file is outside our control once written; its session id
+    // becomes a command-line argument, so it must never look like a flag.
+    assert!(!is_valid_session_id("--dangerously-skip-permissions"));
+    assert!(!is_valid_session_id("-x"));
+    assert!(!is_valid_session_id(""));
+    assert!(!is_valid_session_id("a b"));
+    assert!(!is_valid_session_id("../etc"));
+    assert!(!is_valid_session_id(&"a".repeat(129)));
 }

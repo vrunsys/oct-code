@@ -16,5 +16,5 @@ uuid = { version = "1.29.3", features = ["v4"] }
 which = "8.0.6"
 
 [dev-dependencies]
-escargot = "1.0.1"
+agent_desk_test_support = { path = "../test-support" }
 tempfile = "3.27.0"

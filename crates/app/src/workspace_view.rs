@@ -1,51 +1,51 @@
 //! The window's root view: the project sidebar beside the thread pane.
 //!
-//! `WorkspaceView` owns window-level workflow (adding projects, creating
-//! threads, installing Claude) and composes the child views. Domain data
-//! lives in [`AppState`]; this view keeps only transient UI state.
+//! `WorkspaceView` owns window-level workflow (adding projects, creating and
+//! stopping threads, choosing the appearance) and composes the child views.
+//! Domain data lives in [`AppState`]; this view keeps only transient UI state.
 
 use std::path::Path;
 
-use agent_desk_core::detect::{AgentStatus, current_os, install_command, run_install};
+use agent_desk_core::detect::AgentStatus;
+use agent_desk_core::settings::Appearance;
+use agent_desk_core::thread::{Thread, ThreadId, ThreadStatus};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
+    Sidebar, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
 };
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
+    Anchor, AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, rems,
+    SharedString, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
 };
 
-use crate::actions::{AddProject, NewThread, WORKSPACE_CONTEXT};
+use crate::actions::{
+    AddProject, NewThread, StopThread, UseDarkAppearance, UseLightAppearance, UseSystemAppearance,
+    WORKSPACE_CONTEXT,
+};
 use crate::app_state::AppState;
-use crate::appearance::Appearance;
+use crate::appearance::apply_appearance;
+use crate::claude_banner::ClaudeBanner;
 use crate::composer::Composer;
 use crate::layout::content_column;
 use crate::thread_view::ThreadView;
-
-/// The installer log keeps only its most recent lines.
-const INSTALL_LOG_MAX_LINES: usize = 500;
-
-#[derive(Default)]
-struct InstallState {
-    is_running: bool,
-    log: Vec<SharedString>,
-    is_log_open: bool,
-    /// The installer's exit code from the last run that finished.
-    last_exit: Option<Option<i32>>,
-}
 
 pub struct WorkspaceView {
     app: Entity<AppState>,
     thread_view: Entity<ThreadView>,
     composer: Entity<Composer>,
-    install: InstallState,
+    claude_banner: Entity<ClaudeBanner>,
+    /// A one-run override from the environment; cleared once the user
+    /// chooses an appearance in the app.
+    appearance_override: Option<Appearance>,
+    /// The appearance last applied to the window, to apply only on change.
+    applied_appearance: Appearance,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -53,29 +53,67 @@ pub struct WorkspaceView {
 impl WorkspaceView {
     pub fn new(
         app: Entity<AppState>,
-        appearance: Appearance,
+        appearance_override: Option<Appearance>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let thread_view = cx.new(|cx| ThreadView::new(app.clone(), cx));
         let composer = cx.new(|cx| Composer::new(app.clone(), window, cx));
+        let claude_banner = cx.new(|cx| ClaudeBanner::new(app.clone(), cx));
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 
-        appearance.apply(window, cx);
+        let applied_appearance = appearance_override.unwrap_or(app.read(cx).appearance());
+        apply_appearance(applied_appearance, window, cx);
         let subscriptions = vec![
-            cx.observe(&app, |_, _, cx| cx.notify()),
+            cx.observe_in(&app, window, |this, _, window, cx| {
+                this.apply_appearance_if_changed(window, cx);
+                cx.notify();
+            }),
             // Follow the OS between light and dark while the app is open.
-            cx.observe_window_appearance(window, move |_, window, cx| appearance.apply(window, cx)),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                if this.applied_appearance == Appearance::System {
+                    apply_appearance(Appearance::System, window, cx);
+                }
+            }),
         ];
         Self {
             app,
             thread_view,
             composer,
-            install: InstallState::default(),
+            claude_banner,
+            appearance_override,
+            applied_appearance,
             focus_handle,
             _subscriptions: subscriptions,
         }
+    }
+
+    fn appearance(&self, cx: &Context<Self>) -> Appearance {
+        self.appearance_override
+            .unwrap_or(self.app.read(cx).appearance())
+    }
+
+    fn apply_appearance_if_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let appearance = self.appearance(cx);
+        if appearance != self.applied_appearance {
+            self.applied_appearance = appearance;
+            apply_appearance(appearance, window, cx);
+        }
+    }
+
+    /// The user's choice wins over the environment override and is saved.
+    fn choose_appearance(
+        &mut self,
+        appearance: Appearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.appearance_override = None;
+        self.app
+            .update(cx, |app, cx| app.set_appearance(appearance, cx));
+        self.apply_appearance_if_changed(window, cx);
+        cx.notify();
     }
 
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -139,124 +177,16 @@ impl WorkspaceView {
         }
     }
 
-    fn select_thread(
-        &mut self,
-        id: &agent_desk_core::thread::ThreadId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_thread(&mut self, id: &ThreadId, window: &mut Window, cx: &mut Context<Self>) {
         self.app.update(cx, |app, cx| app.select(id, cx));
         self.composer
             .update(cx, |composer, cx| composer.focus(window, cx));
     }
 
-    /// Asks before running the installer: it downloads and runs a script, so
-    /// the dialog shows the exact command.
-    fn confirm_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (program, args) = install_command(current_os());
-        // Quote arguments with spaces so the dialog shows the exact invocation.
-        let quoted: Vec<String> = args
-            .iter()
-            .map(|arg| {
-                if arg.contains(' ') {
-                    format!("\"{arg}\"")
-                } else {
-                    (*arg).to_owned()
-                }
-            })
-            .collect();
-        let command = format!("{program} {}", quoted.join(" "));
-        let this = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |dialog, _, cx| {
-            let this = this.clone();
-            dialog
-                .confirm()
-                .title("Install Claude Code?")
-                .description(
-                    v_flex()
-                        .gap_2()
-                        .child("Agent Desk will run the official installer from claude.ai:")
-                        .child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().muted)
-                                .text_xs()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .child(command.clone()),
-                        ),
-                )
-                .ok_text("Install")
-                .on_ok(move |_, window, cx| {
-                    let _ = this.update(cx, |this, cx| this.start_install(window, cx));
-                    true
-                })
-        });
-    }
-
-    fn start_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.install.is_running {
-            return;
+    fn stop_selected_thread(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.app.read(cx).selected().cloned() {
+            self.app.update(cx, |app, cx| app.stop(&id, cx));
         }
-        self.install = InstallState {
-            is_running: true,
-            is_log_open: true,
-            ..Default::default()
-        };
-        cx.notify();
-
-        let (lines, received) = async_channel::unbounded::<String>();
-        let installer = cx.background_spawn(run_install(current_os(), move |line| {
-            let _ = lines.try_send(line);
-        }));
-        cx.spawn_in(window, async move |this, cx| {
-            // Ends when the installer finishes and drops its sender.
-            while let Ok(line) = received.recv().await {
-                let _ = this.update(cx, |this, cx| {
-                    let log = &mut this.install.log;
-                    log.push(line.into());
-                    if log.len() > INSTALL_LOG_MAX_LINES {
-                        log.drain(..log.len() - INSTALL_LOG_MAX_LINES);
-                    }
-                    cx.notify();
-                });
-            }
-            let exit = installer.await;
-            let _ = this.update_in(cx, |this, window, cx| this.finish_install(exit, window, cx));
-        })
-        .detach();
-    }
-
-    fn finish_install(
-        &mut self,
-        exit: std::io::Result<Option<i32>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.install.is_running = false;
-        match exit {
-            Ok(code) => {
-                self.install.last_exit = Some(code);
-                if code == Some(0) {
-                    self.app.update(cx, |app, cx| app.recheck_claude(cx));
-                } else {
-                    window.push_notification(
-                        Notification::error(
-                            "The installer didn’t finish. Check the log for details.",
-                        ),
-                        cx,
-                    );
-                }
-            }
-            Err(error) => {
-                self.install
-                    .log
-                    .push(format!("Couldn’t start the installer: {error}").into());
-                window.push_notification(Notification::error("Couldn’t start the installer."), cx);
-            }
-        }
-        cx.notify();
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -264,38 +194,40 @@ impl WorkspaceView {
         let app = self.app.read(cx);
         let selected = app.selected().cloned();
 
-        let projects = app.projects().iter().map(|project| {
-            let threads = app.threads_for(&project.path).into_iter().map(|thread| {
-                let id = thread.id.clone();
-                let this = this.clone();
-                let is_selected = selected.as_ref() == Some(&thread.id);
-                SidebarMenuItem::new(thread.title.clone())
-                    .active(is_selected)
-                    .on_click(move |_, window, cx| {
-                        let _ = this.update(cx, |this, cx| this.select_thread(&id, window, cx));
-                    })
-            });
-            let path = project.path.clone();
-            let this = this.clone();
-            SidebarMenuItem::new(project.name.clone())
-                .icon(IconName::Folder)
-                .default_open(true)
-                .suffix(move |_, _| {
-                    let path = path.clone();
+        let projects: Vec<SidebarMenuItem> = app
+            .projects()
+            .iter()
+            .map(|project| {
+                let threads = app.threads_for(&project.path).into_iter().map(|thread| {
+                    let id = thread.id.clone();
                     let this = this.clone();
-                    Button::new(new_thread_button_id(&path))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Plus)
-                        .tooltip("New thread")
+                    SidebarMenuItem::new(thread.title.clone())
+                        .active(selected.as_ref() == Some(&thread.id))
                         .on_click(move |_, window, cx| {
-                            let _ = this.update(cx, |this, cx| this.new_thread(&path, window, cx));
+                            let _ = this.update(cx, |this, cx| this.select_thread(&id, window, cx));
                         })
-                })
-                .children(threads)
-        });
-        let projects: Vec<SidebarMenuItem> = projects.collect();
-        let add_project = this.clone();
+                });
+                let path = project.path.clone();
+                let this = this.clone();
+                SidebarMenuItem::new(project.name.clone())
+                    .icon(IconName::Folder)
+                    .default_open(true)
+                    .suffix(move |_, _| {
+                        let path = path.clone();
+                        let this = this.clone();
+                        Button::new(new_thread_button_id(&path))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .tooltip("New thread")
+                            .on_click(move |_, window, cx| {
+                                let _ =
+                                    this.update(cx, |this, cx| this.new_thread(&path, window, cx));
+                            })
+                    })
+                    .children(threads)
+            })
+            .collect();
 
         Sidebar::new("sidebar")
             .header(
@@ -309,7 +241,7 @@ impl WorkspaceView {
             .child(
                 SidebarGroup::new("Projects")
                     .suffix(move |_, _| {
-                        let this = add_project.clone();
+                        let this = this.clone();
                         Button::new("add-project")
                             .ghost()
                             .xsmall()
@@ -321,7 +253,17 @@ impl WorkspaceView {
                     })
                     .child(SidebarMenu::new().children(projects)),
             )
-            .footer(SidebarFooter::new().child(self.render_claude_status(cx)))
+            .footer(
+                // A plain row with SidebarFooter's padding: SidebarFooter is styled
+                // as a clickable trigger, and this footer is not one.
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .p_2()
+                    .justify_between()
+                    .child(self.render_claude_status(cx))
+                    .child(self.render_appearance_menu(cx)),
+            )
     }
 
     fn render_claude_status(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -345,153 +287,153 @@ impl WorkspaceView {
         };
         h_flex()
             .gap_2()
+            .min_w_0()
             .text_xs()
             .text_color(theme.muted_foreground)
             .child(Icon::new(icon).xsmall().text_color(color))
-            .child(label)
+            .child(div().truncate().child(label))
     }
 
-    fn render_claude_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let detail = match self.app.read(cx).claude() {
-            AgentStatus::Installed { .. } => return None,
-            AgentStatus::Missing => None,
-            AgentStatus::Broken { path, error } => Some(format!("{}: {error}", path.display())),
+    /// Light, dark or follow the system, in a menu with the current choice
+    /// checked. The icon shows the current choice at a glance.
+    fn render_appearance_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+        let current = self.appearance(cx);
+        let icon = match current {
+            // The bundled icon set has no sun-and-moon glyph; the palette reads as "appearance".
+            Appearance::System => IconName::Palette,
+            Appearance::Light => IconName::Sun,
+            Appearance::Dark => IconName::Moon,
         };
-        let theme = cx.theme();
-        let install = &self.install;
-        let finished_but_missing = install.last_exit == Some(Some(0));
-
-        let message = if finished_but_missing {
-            "Claude Code was installed, but Agent Desk can’t find it yet. Restart Agent Desk, or set AGENT_DESK_CLAUDE_BIN.".to_owned()
-        } else {
-            detail.unwrap_or_else(|| "Install it to start working with an agent.".to_owned())
-        };
-
-        let row = h_flex()
-            .gap_3()
-            .px_4()
-            .py_2()
-            .child(
-                Icon::new(IconName::TriangleAlert)
-                    .small()
-                    .text_color(theme.warning),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Claude Code not found"),
+        let focus_handle = self.focus_handle.clone();
+        Button::new("appearance")
+            .ghost()
+            .xsmall()
+            .icon(icon)
+            .tooltip("Appearance")
+            .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                menu.action_context(focus_handle.clone())
+                    .menu_with_check(
+                        "System",
+                        current == Appearance::System,
+                        Box::new(UseSystemAppearance),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(message),
-                    ),
-            )
-            .when(!install.log.is_empty(), |this| {
-                this.child(
-                    Button::new("install-log")
-                        .ghost()
-                        .small()
-                        .label(if install.is_log_open {
-                            "Hide log"
-                        } else {
-                            "Show log"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.install.is_log_open = !this.install.is_log_open;
-                            cx.notify();
-                        })),
-                )
+                    .menu_with_check(
+                        "Light",
+                        current == Appearance::Light,
+                        Box::new(UseLightAppearance),
+                    )
+                    .menu_with_check(
+                        "Dark",
+                        current == Appearance::Dark,
+                        Box::new(UseDarkAppearance),
+                    )
             })
-            .child(
-                Button::new("recheck-claude")
-                    .ghost()
-                    .small()
-                    .label("Recheck")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.app.update(cx, |app, cx| app.recheck_claude(cx));
-                    })),
-            )
-            .child(
-                Button::new("install-claude")
-                    .outline()
-                    .small()
-                    .label("Install…")
-                    .loading(install.is_running)
-                    .on_click(cx.listener(|this, _, window, cx| this.confirm_install(window, cx))),
-            );
-
-        let log = install.is_log_open.then(|| {
-            div()
-                .id("install-log-lines")
-                .mx_4()
-                .mb_2()
-                .px_3()
-                .py_2()
-                .max_h(rems(12.))
-                .overflow_y_scroll()
-                .rounded(theme.radius)
-                .bg(theme.muted)
-                .text_xs()
-                .font_family(theme.mono_font_family.clone())
-                .children(install.log.iter().cloned())
-        });
-
-        Some(
-            v_flex()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(row)
-                .children(log)
-                .into_any_element(),
-        )
     }
 
-    fn render_thread_header(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+    fn render_thread_header(&self, thread: &Thread, cx: &mut Context<Self>) -> AnyElement {
         let app = self.app.read(cx);
-        let thread = app.selected_thread()?;
         let project_name = app
             .projects()
             .iter()
             .find(|project| project.path == thread.project)
             .map(|project| project.name.clone())
             .unwrap_or_else(|| thread.project.display().to_string());
+        let is_running = thread.status == ThreadStatus::Running;
+        let is_stoppable = is_running && app.is_live(&thread.id);
         let theme = cx.theme();
-        Some(
-            div().border_b_1().border_color(theme.border).py_3().child(
+
+        div()
+            .border_b_1()
+            .border_color(theme.border)
+            .py_2()
+            .child(
                 content_column()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .min_h_7()
                     .text_sm()
-                    .min_w_0()
                     .child(div().text_color(theme.muted_foreground).child(project_name))
                     .child(div().text_color(theme.muted_foreground).child("›"))
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .truncate()
                             .font_weight(FontWeight::MEDIUM)
                             .child(thread.title.clone()),
+                    )
+                    .when(is_running, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(Spinner::new().xsmall())
+                                .child("Working"),
+                        )
+                    })
+                    .when(is_stoppable, |this| {
+                        this.child(
+                            Button::new("stop-thread")
+                                .ghost()
+                                .small()
+                                .label("Stop")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.stop_selected_thread(cx)),
+                                ),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// Why the last turn failed, next to where the user retries.
+    fn render_failure(reason: &str, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        content_column()
+            .pb_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .text_sm()
+                    .child(
+                        div().pt_0p5().child(
+                            Icon::new(IconName::CircleX)
+                                .xsmall()
+                                .text_color(theme.danger),
+                        ),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(div().child(reason.to_owned()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Send a message to try again."),
+                            ),
                     ),
-            ),
-        )
+            )
+            .into_any_element()
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let app = self.app.read(cx);
-        if app.selected_thread().is_some() {
+        if let Some(thread) = app.selected_thread().cloned() {
+            let header = self.render_thread_header(&thread, cx);
+            let failure = match &thread.status {
+                ThreadStatus::Failed(reason) => Some(Self::render_failure(reason, cx)),
+                _ => None,
+            };
             return v_flex()
                 .size_full()
                 .min_w_0()
-                .children(self.render_thread_header(cx))
+                .child(header)
                 .child(div().flex_1().min_h_0().child(self.thread_view.clone()))
+                .children(failure)
                 .child(self.composer.clone())
                 .into_any_element();
         }
@@ -530,6 +472,16 @@ impl Render for WorkspaceView {
                     this.new_thread_in_context(window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &StopThread, _, cx| this.stop_selected_thread(cx)))
+            .on_action(cx.listener(|this, _: &UseSystemAppearance, window, cx| {
+                this.choose_appearance(Appearance::System, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UseLightAppearance, window, cx| {
+                this.choose_appearance(Appearance::Light, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UseDarkAppearance, window, cx| {
+                this.choose_appearance(Appearance::Dark, window, cx)
+            }))
             .items_stretch()
             .size_full()
             .bg(theme.background)
@@ -540,7 +492,7 @@ impl Render for WorkspaceView {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .children(self.render_claude_banner(cx))
+                    .child(self.claude_banner.clone())
                     .child(div().flex_1().min_h_0().child(self.render_main(cx))),
             )
     }

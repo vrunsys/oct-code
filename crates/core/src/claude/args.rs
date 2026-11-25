@@ -54,3 +54,19 @@ pub fn build_args(cfg: &ClaudeConfig) -> Vec<String> {
     }
     args
 }
+
+/// Longest session id accepted for `--resume`; real ids are 36-char UUIDs.
+const SESSION_ID_MAX_LEN: usize = 128;
+
+/// Whether `id` is safe to pass as the value of `--resume`.
+///
+/// Session ids come back from saved thread files, which are outside the app's
+/// control once written. An id must start with a letter or digit and contain
+/// only letters, digits, `-` and `_`, so it can never be read as a flag.
+pub fn is_valid_session_id(id: &str) -> bool {
+    id.len() <= SESSION_ID_MAX_LEN
+        && id.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
