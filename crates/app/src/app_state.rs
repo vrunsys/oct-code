@@ -9,15 +9,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use agent_desk_core::claude::history::{self, HistoryEntry, HistorySession};
 use agent_desk_core::claude::{
     AgentEvent, ClaudeConfig, ClaudeSession, PermissionSetup, SessionError, SessionEvent,
-    is_valid_session_id,
+    is_known_model, is_valid_session_id,
 };
 use agent_desk_core::detect::{AgentStatus, detect_claude};
 use agent_desk_core::settings::{Appearance, Settings};
 use agent_desk_core::store::{Project, ProjectList, ThreadStore};
 use agent_desk_core::thread::{Thread, ThreadId, ThreadStatus};
-use gpui_kit::Context;
+use gpui_kit::{AppContext as _, Context};
 
 /// The binary name used when detection found nothing and no override is set;
 /// starting it then fails with a "not found" hint rather than running
@@ -46,12 +47,24 @@ pub struct AppState {
     store: ThreadStore,
     root: PathBuf,
     claude_override: Option<PathBuf>,
+    /// Claude Code's config directory, read for a project's past sessions.
+    history_home: Option<PathBuf>,
 }
 
 impl AppState {
     /// Loads everything under `root`. Never fails: unreadable data is skipped
     /// by the store and reported in the log.
     pub fn load(root: PathBuf, claude_override: Option<PathBuf>) -> Self {
+        Self::load_with_history(root, claude_override, history::claude_home())
+    }
+
+    /// [`AppState::load`] with an explicit Claude Code config directory for
+    /// past sessions; `None` imports none.
+    pub fn load_with_history(
+        root: PathBuf,
+        claude_override: Option<PathBuf>,
+        history_home: Option<PathBuf>,
+    ) -> Self {
         let store = ThreadStore::new(root.clone());
         let mut threads = store.load_all();
         for thread in &mut threads {
@@ -72,6 +85,7 @@ impl AppState {
             store,
             root,
             claude_override,
+            history_home,
         }
     }
 
@@ -124,9 +138,72 @@ impl AppState {
         threads
     }
 
+    /// Adds the folder and shows its existing Claude Code sessions as threads.
     pub fn add_project(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.last_error = self.projects.add(path).err().map(|error| error.to_string());
+        match self.projects.add(path) {
+            Ok(project) => {
+                self.last_error = None;
+                self.import_history(project.path, cx);
+            }
+            Err(error) => self.last_error = Some(error.to_string()),
+        }
         cx.notify();
+    }
+
+    /// Imports sessions started outside Agent Desk for every project.
+    pub fn import_all_history(&mut self, cx: &mut Context<Self>) {
+        let projects: Vec<PathBuf> = self
+            .projects()
+            .iter()
+            .map(|project| project.path.clone())
+            .collect();
+        for project in projects {
+            self.import_history(project, cx);
+        }
+    }
+
+    /// Reads the project's Claude Code history off the UI thread, then adds
+    /// each session that is not already a thread.
+    fn import_history(&mut self, project: PathBuf, cx: &mut Context<Self>) {
+        let Some(home) = self.history_home.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let scan_project = project.clone();
+            let sessions = cx
+                .background_spawn(
+                    async move { history::sessions_for_project(&home, &scan_project) },
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.add_history_sessions(&project, sessions, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn add_history_sessions(
+        &mut self,
+        project: &Path,
+        sessions: Vec<HistorySession>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut added = false;
+        for session in sessions {
+            let is_known = self
+                .threads
+                .iter()
+                .any(|thread| thread.session_id.as_deref() == Some(session.session_id.as_str()));
+            if is_known {
+                continue;
+            }
+            self.threads.push(thread_from_history(project, session));
+            self.save_thread(self.threads.len() - 1);
+            added = true;
+        }
+        if added {
+            cx.notify();
+        }
     }
 
     /// Creates an empty thread in `project`, selects it and saves it.
@@ -199,6 +276,25 @@ impl AppState {
         cx.notify();
     }
 
+    /// Sets the thread's model; `None` uses Claude's default. Only known
+    /// aliases are kept. A live session ends so the next message restarts
+    /// with the new model and resumes the same conversation.
+    pub fn set_model(&mut self, id: &ThreadId, model: Option<String>, cx: &mut Context<Self>) {
+        let Some(ix) = self.thread_ix(id) else {
+            return;
+        };
+        let model = model.filter(|model| is_known_model(model));
+        if self.threads[ix].model == model {
+            return;
+        }
+        self.threads[ix].model = model;
+        // Dropping the session kills the process; nothing is mid-turn, as the
+        // composer disables the picker while a turn runs.
+        self.sessions.remove(id);
+        self.save_thread(ix);
+        cx.notify();
+    }
+
     pub fn recheck_claude(&mut self, cx: &mut Context<Self>) {
         self.claude = detect_claude(self.claude_override.as_deref());
         cx.notify();
@@ -236,6 +332,7 @@ impl AppState {
             binary: self.claude_binary(),
             cwd: thread.project.clone(),
             resume,
+            model: thread.model.clone().filter(|model| is_known_model(model)),
             permission: PermissionSetup::FullAccess,
         };
         let (session, events) = ClaudeSession::start(&config).map_err(|error| match error {
@@ -327,4 +424,23 @@ impl AppState {
             self.last_error = Some(format!("Couldn’t save “{}”: {error}", thread.title));
         }
     }
+}
+
+/// A thread holding a past session's conversation, ready to resume it.
+fn thread_from_history(project: &Path, session: HistorySession) -> Thread {
+    let mut thread = Thread::new(project.to_path_buf());
+    for entry in &session.entries {
+        match entry {
+            HistoryEntry::User(text) => thread.push_user(text),
+            HistoryEntry::Agent(event) => thread.apply(event),
+        }
+    }
+    // History has no turn results, and no process is running for it.
+    thread.status = ThreadStatus::Idle;
+    thread.session_id = Some(session.session_id);
+    thread.created_at = session.modified_ms;
+    if let Some(title) = session.title.filter(|title| !title.trim().is_empty()) {
+        thread.title = title;
+    }
+    thread
 }

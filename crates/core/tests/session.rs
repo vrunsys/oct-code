@@ -11,6 +11,7 @@ fn config(cwd: PathBuf, resume: Option<&str>) -> ClaudeConfig {
         binary: fake_claude_path(),
         cwd,
         resume: resume.map(str::to_owned),
+        model: None,
         permission: PermissionSetup::FullAccess,
     }
 }

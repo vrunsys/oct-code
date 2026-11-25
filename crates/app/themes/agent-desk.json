@@ -2,12 +2,14 @@
   "$schema": "https://github.com/longbridge/gpui-kit/raw/refs/heads/main/.theme-schema.json",
   "name": "Agent Desk",
   "author": "Agent Desk",
-  "_palette": "Brand: ink #212121 (primary), coral #FF7759 (accent), paper #FAFAFA. Neutrals between ink and paper are derived. Coral never carries text: on paper it is about 2.4:1.",
+  "_palette": "Brand: ink #212121 (primary), coral #FF7759 (accent), paper #FAFAFA. Neutrals between ink and paper are derived. Corners are square: radius 0 everywhere. Coral never carries text: on paper it is about 2.4:1.",
   "themes": [
     {
       "is_default": true,
       "name": "Agent Desk Light",
       "mode": "light",
+      "radius": 0,
+      "radius.lg": 0,
       "colors": {
         "background": "#FAFAFA",
         "foreground": "#212121",
@@ -59,6 +61,8 @@
       "is_default": true,
       "name": "Agent Desk Dark",
       "mode": "dark",
+      "radius": 0,
+      "radius.lg": 0,
       "colors": {
         "background": "#212121",
         "foreground": "#FAFAFA",

@@ -17,7 +17,17 @@ pub struct ClaudeConfig {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub resume: Option<String>,
+    /// A model alias from [`MODEL_ALIASES`]; anything else is not passed.
+    pub model: Option<String>,
     pub permission: PermissionSetup,
+}
+
+/// The model aliases Agent Desk offers, as Claude Code's `--model` takes them.
+pub const MODEL_ALIASES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+
+/// Whether `model` is one of [`MODEL_ALIASES`].
+pub fn is_known_model(model: &str) -> bool {
+    MODEL_ALIASES.contains(&model)
 }
 
 pub fn build_args(cfg: &ClaudeConfig) -> Vec<String> {
@@ -49,6 +59,9 @@ pub fn build_args(cfg: &ClaudeConfig) -> Vec<String> {
         }
     }
 
+    if let Some(model) = cfg.model.as_deref().filter(|model| is_known_model(model)) {
+        args.extend(["--model".to_owned(), model.to_owned()]);
+    }
     if let Some(session_id) = &cfg.resume {
         args.extend(["--resume".to_owned(), session_id.clone()]);
     }

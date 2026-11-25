@@ -41,7 +41,7 @@ pub fn install(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use gpui_kit::component::{Theme, ThemeMode};
-    use gpui_kit::{Hsla, TestAppContext, rgb};
+    use gpui_kit::{Hsla, TestAppContext, px, rgb};
 
     use super::{brand_themes, install};
 
@@ -90,6 +90,20 @@ mod tests {
             assert_eq!(theme.background, Hsla::from(rgb(0x212121)));
             assert_eq!(theme.foreground, Hsla::from(rgb(0xFAFAFA)));
             assert_eq!(theme.ring, Hsla::from(rgb(0xFF7759)));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn corners_are_square_in_both_modes(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            install(cx);
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                Theme::change(mode, None, cx);
+                let theme = Theme::global(cx);
+                assert_eq!(theme.radius, px(0.), "{mode:?} radius");
+                assert_eq!(theme.radius_lg, px(0.), "{mode:?} large radius");
+            }
         });
     }
 

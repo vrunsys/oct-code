@@ -63,6 +63,9 @@ pub struct Thread {
     /// Creation time in Unix milliseconds; 0 for threads saved before this field existed.
     #[serde(default)]
     pub created_at: u64,
+    /// The model alias chosen for this thread; `None` uses Claude's default.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl Thread {
@@ -76,6 +79,7 @@ impl Thread {
             status: ThreadStatus::Idle,
             cost_usd: 0.0,
             created_at: unix_millis_now(),
+            model: None,
         }
     }
 

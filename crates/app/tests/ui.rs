@@ -20,7 +20,7 @@ fn open_workspace(root: &Path, cx: &mut TestAppContext) -> (AnyWindowHandle, Ent
     cx.update(agent_desk::actions::bind_keys);
     let root = root.to_path_buf();
     let missing_claude = root.join("no-claude-here");
-    let app = cx.new(|_| AppState::load(root, Some(missing_claude)));
+    let app = cx.new(|_| AppState::load_with_history(root, Some(missing_claude), None));
     let window_app = app.clone();
     let (handle, _) = cx.update(|cx| {
         gpui_kit::open_window(
@@ -159,7 +159,8 @@ fn stop_shortcut_ends_the_live_session(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(agent_desk::theme::install);
     cx.update(agent_desk::actions::bind_keys);
-    let app = cx.new(|_| AppState::load(root.path().into(), Some(fake_claude_path())));
+    let app =
+        cx.new(|_| AppState::load_with_history(root.path().into(), Some(fake_claude_path()), None));
     let window_app = app.clone();
     let (handle, _) = cx.update(|cx| {
         gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
@@ -186,4 +187,47 @@ fn stop_shortcut_ends_the_live_session(cx: &mut TestAppContext) {
     .unwrap();
     cx.run_until_parked();
     assert!(!app.read_with(cx, |app, _| app.is_live(&id)));
+}
+
+#[gpui_kit::test]
+fn model_menu_sets_the_threads_model(cx: &mut TestAppContext) {
+    use gpui_kit::MouseButton;
+    use gpui_kit::test::{TestEventExt, TestQueryExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    fs::create_dir(work.path().join("repo")).unwrap();
+    let project = ProjectList::load(root.path().into())
+        .add(&work.path().join("repo"))
+        .unwrap()
+        .path;
+    let (handle, app) = open_workspace(root.path(), cx);
+    let id = app.update(cx, |app, cx| app.new_thread(&project, cx));
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        // The icon-only Send button still has a name for assistive technology.
+        assert!(window.try_find_by_label("Send").is_some());
+        window.click("model-picker", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let opus = window.find_by_label("Opus").bounds().center();
+        window.pointer_down(opus, MouseButton::Left, cx);
+        window.pointer_up(opus, MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let model = app.read_with(cx, |app, _| {
+        app.threads()
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap()
+            .model
+            .clone()
+    });
+    assert_eq!(model.as_deref(), Some("opus"));
 }

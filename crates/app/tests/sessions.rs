@@ -34,7 +34,7 @@ impl Fixture {
     fn load(&self, cx: &mut TestAppContext, claude: Option<PathBuf>) -> Entity<AppState> {
         cx.executor().allow_parking();
         let root = self.root.path().to_path_buf();
-        cx.new(|_| AppState::load(root, claude))
+        cx.new(|_| AppState::load_with_history(root, claude, None))
     }
 
     /// A loaded app with fake-claude, this project and one selected thread.
@@ -245,4 +245,36 @@ fn unsafe_saved_session_id_is_not_resumed(cx: &mut TestAppContext) {
         !last_assistant(&thread).contains("dangerously"),
         "{thread:#?}"
     );
+}
+
+#[gpui_kit::test]
+fn choosing_a_model_restarts_with_it(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (app, id) = fixture.start(cx);
+    send(cx, &app, &id, "hi");
+    wait_for(cx, &app, &id, idle_with_items(2));
+
+    app.update(cx, |app, cx| app.set_model(&id, Some("opus".into()), cx));
+    assert!(
+        !app.read_with(cx, |app, _| app.is_live(&id)),
+        "the old session ends"
+    );
+    send(cx, &app, &id, "args");
+    let thread = wait_for(cx, &app, &id, idle_with_items(4));
+    assert!(
+        last_assistant(&thread).contains("--model opus"),
+        "{thread:#?}"
+    );
+    assert!(
+        last_assistant(&thread).contains("--resume fake-session-1"),
+        "{thread:#?}"
+    );
+}
+
+#[gpui_kit::test]
+fn an_unknown_model_is_not_kept(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (app, id) = fixture.start(cx);
+    app.update(cx, |app, cx| app.set_model(&id, Some("--evil".into()), cx));
+    assert_eq!(thread(cx, &app, &id).model, None);
 }

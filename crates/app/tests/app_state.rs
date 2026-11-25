@@ -12,7 +12,7 @@ use gpui_kit::{AppContext as _, Entity, TestAppContext};
 fn load(root: &Path, cx: &mut TestAppContext) -> Entity<AppState> {
     let missing_claude = root.join("no-claude-here");
     let root = root.to_path_buf();
-    cx.new(|_| AppState::load(root, Some(missing_claude)))
+    cx.new(|_| AppState::load_with_history(root, Some(missing_claude), None))
 }
 
 fn project_dir(parent: &Path, name: &str) -> PathBuf {

@@ -7,6 +7,7 @@ fn config(resume: Option<&str>, permission: PermissionSetup) -> ClaudeConfig {
         binary: PathBuf::from("claude"),
         cwd: PathBuf::from("/tmp/project"),
         resume: resume.map(str::to_owned),
+        model: None,
         permission,
     }
 }
@@ -76,4 +77,25 @@ fn ids_that_could_inject_arguments_are_invalid() {
     assert!(!is_valid_session_id("a b"));
     assert!(!is_valid_session_id("../etc"));
     assert!(!is_valid_session_id(&"a".repeat(129)));
+}
+
+#[test]
+fn model_alias_appends_flag() {
+    let mut cfg = config(None, PermissionSetup::FullAccess);
+    cfg.model = Some("opus".into());
+    let args = build_args(&cfg);
+    let at = args.iter().position(|a| a == "--model").expect("--model");
+    assert_eq!(args[at + 1], "opus");
+}
+
+#[test]
+fn unknown_model_is_not_passed() {
+    // A thread file can be edited by hand; its model must not become a flag.
+    let mut cfg = config(None, PermissionSetup::FullAccess);
+    cfg.model = Some("--dangerously-skip-permissions".into());
+    assert!(
+        !build_args(&cfg)
+            .iter()
+            .any(|a| a == "--model" || a.contains("dangerously"))
+    );
 }
