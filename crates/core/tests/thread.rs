@@ -321,3 +321,63 @@ fn a_new_turn_counts_tokens_from_zero() {
     t.push_user("again");
     assert_eq!(t.turn_tokens(), TokenCount::default());
 }
+
+fn compacted_event(trigger: &str) -> AgentEvent {
+    AgentEvent::Compacted {
+        trigger: trigger.into(),
+        pre_tokens: Some(100),
+        post_tokens: Some(10),
+    }
+}
+
+#[test]
+fn a_compaction_becomes_a_marker_that_takes_its_summary() {
+    use agent_desk_core::thread::Compaction;
+
+    let mut t = thread();
+    t.push_user("hi");
+    t.apply(&compacted_event("auto"));
+    t.apply(&AgentEvent::CompactSummary {
+        text: "The session so far…".into(),
+    });
+    assert_eq!(
+        t.items.last(),
+        Some(&Item::Compacted(Compaction {
+            trigger: "auto".into(),
+            pre_tokens: Some(100),
+            post_tokens: Some(10),
+            summary: Some("The session so far…".into()),
+        }))
+    );
+    // The summary is not a message from the user.
+    assert_eq!(t.items.len(), 2);
+}
+
+#[test]
+fn a_summary_with_no_compaction_before_it_is_dropped() {
+    let mut t = thread();
+    t.apply(&AgentEvent::CompactSummary { text: "x".into() });
+    assert!(t.items.is_empty());
+}
+
+#[test]
+fn each_compaction_keeps_its_own_summary() {
+    use agent_desk_core::thread::Compaction;
+
+    let mut t = thread();
+    for (trigger, summary) in [("auto", "first"), ("manual", "second")] {
+        t.apply(&compacted_event(trigger));
+        t.apply(&AgentEvent::CompactSummary {
+            text: summary.into(),
+        });
+    }
+    let summaries: Vec<_> = t
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Compacted(Compaction { summary, .. }) => summary.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(summaries, ["first", "second"]);
+}

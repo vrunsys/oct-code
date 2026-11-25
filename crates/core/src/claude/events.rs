@@ -45,6 +45,20 @@ pub enum AgentEvent {
         content: String,
         is_error: bool,
     },
+    /// The conversation was compacted: older turns were replaced by a
+    /// summary to free up the context window.
+    Compacted {
+        /// `"auto"` or `"manual"`; anything else reads as `"auto"`.
+        trigger: String,
+        /// Context size before and after, when Claude reports them.
+        pre_tokens: Option<u64>,
+        post_tokens: Option<u64>,
+    },
+    /// The summary that replaced the older turns, as Claude Code's session
+    /// files record it. It is not something the person wrote.
+    CompactSummary {
+        text: String,
+    },
     /// Tokens one model call has used so far. A call reports several times
     /// as it runs, each with its running totals; `message_id` is `None` for
     /// a report on the call in progress.
@@ -100,6 +114,9 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>, ParseError> {
             session_id: required_str(&value, "session_id")?,
             model: required_str(&value, "model")?,
         }]),
+        "system" if str_field(&value, "subtype") == Some("compact_boundary") => {
+            Ok(vec![compaction(&value)])
+        }
         "assistant" => content_blocks(&value)?
             .iter()
             .filter_map(|block| match str_field(block, "type") {
@@ -163,6 +180,28 @@ fn stream_delta(value: &Value) -> Option<AgentEvent> {
         _ => return None,
     };
     (!text.is_empty()).then(|| event(text.to_owned()))
+}
+
+/// A `compact_boundary` line. The stream spells its fields in snake case and
+/// the session files in camel case.
+fn compaction(value: &Value) -> AgentEvent {
+    let metadata = value
+        .get("compact_metadata")
+        .or_else(|| value.get("compactMetadata"));
+    let count = |snake: &str, camel: &str| {
+        metadata
+            .and_then(|metadata| metadata.get(snake).or_else(|| metadata.get(camel)))
+            .and_then(Value::as_u64)
+    };
+    let trigger = metadata
+        .and_then(|metadata| str_field(metadata, "trigger"))
+        .filter(|trigger| *trigger == "manual")
+        .unwrap_or("auto");
+    AgentEvent::Compacted {
+        trigger: trigger.to_owned(),
+        pre_tokens: count("pre_tokens", "preTokens"),
+        post_tokens: count("post_tokens", "postTokens"),
+    }
 }
 
 /// Usage reported as a model call starts (with its id) or ends (without).

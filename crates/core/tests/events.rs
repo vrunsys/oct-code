@@ -192,3 +192,43 @@ fn token_usage_arrives_as_the_message_starts_and_ends() {
     assert_eq!(last.0, None, "message_delta belongs to the current message");
     assert_eq!(last.2, 75);
 }
+
+fn compacted(trigger: &str, pre: Option<u64>, post: Option<u64>) -> AgentEvent {
+    AgentEvent::Compacted {
+        trigger: trigger.into(),
+        pre_tokens: pre,
+        post_tokens: post,
+    }
+}
+
+#[test]
+fn a_compact_boundary_reports_its_trigger_and_sizes() {
+    // As `--output-format stream-json` writes it.
+    let live = r#"{"type":"system","subtype":"compact_boundary","session_id":"s","compact_metadata":{"trigger":"auto","pre_tokens":751410,"post_tokens":27406}}"#;
+    assert_eq!(
+        parse_line(live).unwrap(),
+        [compacted("auto", Some(751_410), Some(27_406))]
+    );
+    // The size after compaction is not always known.
+    let manual = r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":90000}}"#;
+    assert_eq!(
+        parse_line(manual).unwrap(),
+        [compacted("manual", Some(90_000), None)]
+    );
+}
+
+#[test]
+fn a_compact_boundary_from_the_history_file_reads_the_same() {
+    // As Claude Code's session files spell it.
+    let recorded = r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","compactMetadata":{"trigger":"auto","preTokens":751410,"postTokens":27406,"durationMs":92189}}"#;
+    assert_eq!(
+        parse_line(recorded).unwrap(),
+        [compacted("auto", Some(751_410), Some(27_406))]
+    );
+}
+
+#[test]
+fn a_compact_boundary_without_details_still_marks_the_compaction() {
+    let bare = r#"{"type":"system","subtype":"compact_boundary"}"#;
+    assert_eq!(parse_line(bare).unwrap(), [compacted("auto", None, None)]);
+}

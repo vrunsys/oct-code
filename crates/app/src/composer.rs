@@ -70,6 +70,19 @@ impl Composer {
             .is_some_and(|thread| thread.status == ThreadStatus::Running)
     }
 
+    /// Whether the selected thread has a turn running that Stop can end.
+    fn is_stoppable(&self, cx: &Context<Self>) -> bool {
+        let app = self.app.read(cx);
+        app.selected_thread()
+            .is_some_and(|thread| thread.status == ThreadStatus::Running && app.is_live(&thread.id))
+    }
+
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.app.read(cx).selected().cloned() {
+            self.app.update(cx, |app, cx| app.stop(&id, cx));
+        }
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_busy(cx) {
             return;
@@ -318,6 +331,37 @@ fn picker_label(catalog: &ModelCatalog, model: Option<&str>, effort: Option<&str
     }
 }
 
+impl Composer {
+    /// Send, or Stop in the same place while a turn runs: one control for
+    /// the one thing the next click can do.
+    fn render_action_button(
+        &self,
+        is_empty: bool,
+        is_busy: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        if self.is_stoppable(cx) {
+            return Button::new("stop-thread")
+                .primary()
+                .small()
+                .icon(IconName::Square)
+                .accessibility_label("Stop")
+                .tooltip("Stop")
+                .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+                .into_any_element();
+        }
+        Button::new("send")
+            .primary()
+            .small()
+            .icon(IconName::ArrowUp)
+            .accessibility_label("Send")
+            .tooltip("Send (Enter). Shift+Enter adds a line")
+            .disabled(is_empty || is_busy)
+            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
+            .into_any_element()
+    }
+}
+
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -343,16 +387,7 @@ impl Render for Composer {
                         .gap_2()
                         .child(self.render_mode_toggle(is_busy, cx))
                         .child(self.render_model_picker(is_busy, cx))
-                        .child(
-                            Button::new("send")
-                                .primary()
-                                .small()
-                                .icon(IconName::ArrowUp)
-                                .accessibility_label("Send")
-                                .tooltip("Send (Enter). Shift+Enter adds a line")
-                                .disabled(is_empty || is_busy)
-                                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-                        ),
+                        .child(self.render_action_button(is_empty, is_busy, cx)),
                 ),
         )
     }

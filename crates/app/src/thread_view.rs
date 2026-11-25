@@ -1,4 +1,5 @@
-//! The conversation pane: a virtualized list of a thread's items.
+//! The conversation pane: a virtualized list of a thread's items, with the
+//! running turn's progress under it.
 //!
 //! Messages render as quiet typographic blocks rather than chat bubbles.
 //! Claude's thinking shows in muted text above what it led to, open by
@@ -8,14 +9,19 @@
 //! result never lays out in full unless the user asks for it.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
-use agent_desk_core::thread::{ApprovalState, Item, ThreadId, ToolOutcome};
+use agent_desk_core::thread::{
+    ApprovalState, Compaction, Item, ThreadId, ThreadStatus, ToolOutcome,
+};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, list,
-    prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
+    Render, SharedString, StyleRefinement, Styled as _, Subscription, Task, Window, div,
+    prelude::FluentBuilder as _,
 };
 use serde_json::Value;
 
@@ -69,7 +75,9 @@ fn truncate_chars(text: &str, max: usize) -> String {
 
 pub struct ThreadView {
     app: Entity<AppState>,
-    list: ListState,
+    /// Owns the list's scroll position and follows the newest message while
+    /// the reader is at the end.
+    scroller: Entity<MessageScrollerState>,
     /// The thread and item count the list was last synced to.
     shown: Option<(ThreadId, usize)>,
     /// [`AppState::rewrites`] when the list was last synced.
@@ -79,22 +87,29 @@ pub struct ThreadView {
     full_output: HashSet<String>,
     /// Indexes of thinking items the user folded away.
     folded_thinking: HashSet<usize>,
+    /// Indexes of compactions whose summary the user opened; they start
+    /// closed, since the summary is long.
+    open_compactions: HashSet<usize>,
+    /// Re-renders each second while the thread works, so its elapsed time
+    /// counts up.
+    ticker: Option<Task<()>>,
     _app_subscription: Subscription,
 }
 
 impl ThreadView {
     pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        // Overdraw is a render budget in physical pixels, not product geometry.
-        let list = ListState::new(0, ListAlignment::Bottom, px(800.));
+        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let subscription = cx.observe(&app, |this, _, cx| this.sync(cx));
         let mut this = Self {
             app,
-            list,
+            scroller,
             shown: None,
             rewrites: 0,
             expanded: HashSet::new(),
             full_output: HashSet::new(),
             folded_thinking: HashSet::new(),
+            open_compactions: HashSet::new(),
+            ticker: None,
             _app_subscription: subscription,
         };
         this.sync(cx);
@@ -113,30 +128,47 @@ impl ThreadView {
             (Some((shown_id, shown_len)), Some((id, len)))
                 if shown_id == id && len >= shown_len && !is_rewritten =>
             {
-                // The last message may still be growing as Claude writes it.
-                if let Some(last) = shown_len.checked_sub(1) {
-                    self.list.remeasure_items(last..*shown_len);
-                }
-                if len > shown_len {
-                    self.list.splice(*shown_len..*shown_len, len - shown_len);
-                }
+                let (shown_len, len) = (*shown_len, *len);
+                self.scroller.update(cx, |scroller, cx| {
+                    // The last message may still be growing as Claude writes it.
+                    if let Some(last) = shown_len.checked_sub(1) {
+                        scroller.remeasure_items(last..shown_len, cx);
+                    }
+                    if len > shown_len {
+                        scroller.append(len - shown_len, cx);
+                    }
+                });
             }
             _ => {
-                self.list.reset(next.as_ref().map_or(0, |(_, len)| *len));
+                let len = next.as_ref().map_or(0, |(_, len)| *len);
+                self.scroller
+                    .update(cx, |scroller, cx| scroller.reset(len, cx));
                 self.expanded.clear();
                 self.full_output.clear();
                 self.folded_thinking.clear();
+                self.open_compactions.clear();
             }
         }
         self.shown = next;
+        // Turns start and end through app changes, so this is where the
+        // clock starts and stops; drawing never changes state.
+        let is_working = self.progress(cx).is_some();
+        self.tick_while(is_working, cx);
         cx.notify();
+    }
+
+    /// A row whose content changed height is measured again.
+    fn remeasure_row(&self, ix: usize, cx: &mut Context<Self>) {
+        self.scroller.update(cx, |scroller, cx| {
+            scroller.remeasure_items(ix..ix + 1, cx);
+        });
     }
 
     fn toggle_expanded(&mut self, ix: usize, tool_id: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(tool_id) {
             self.expanded.insert(tool_id.to_owned());
         }
-        self.list.remeasure_items(ix..ix + 1);
+        self.remeasure_row(ix, cx);
         cx.notify();
     }
 
@@ -144,7 +176,15 @@ impl ThreadView {
         if !self.folded_thinking.remove(&ix) {
             self.folded_thinking.insert(ix);
         }
-        self.list.remeasure_items(ix..ix + 1);
+        self.remeasure_row(ix, cx);
+        cx.notify();
+    }
+
+    fn toggle_compaction(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if !self.open_compactions.remove(&ix) {
+            self.open_compactions.insert(ix);
+        }
+        self.remeasure_row(ix, cx);
         cx.notify();
     }
 
@@ -152,7 +192,7 @@ impl ThreadView {
         if !self.full_output.remove(tool_id) {
             self.full_output.insert(tool_id.to_owned());
         }
-        self.list.remeasure_items(ix..ix + 1);
+        self.remeasure_row(ix, cx);
         cx.notify();
     }
 
@@ -173,6 +213,7 @@ impl ThreadView {
                 self.render_message("Claude", body, false, cx)
             }
             Item::Thinking(text) => self.render_thinking(ix, text, cx),
+            Item::Compacted(compaction) => self.render_compaction(ix, compaction, cx),
             Item::Stats(stats) => div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
@@ -264,6 +305,61 @@ impl ThreadView {
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(assistant_markdown(self.message_id(ix), text)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// A rule across the thread with what happened in the middle of it. The
+    /// summary Claude kept opens under it, and reads as Claude's own text.
+    fn render_compaction(
+        &self,
+        ix: usize,
+        compaction: Compaction,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let label = format::compaction(&compaction);
+        let is_open = self.open_compactions.contains(&ix);
+        let rule = || div().flex_1().h_px().bg(theme.border);
+        let title = if compaction.summary.is_some() {
+            Button::new(SharedString::from(format!("compaction-{ix}")))
+                .ghost()
+                .xsmall()
+                .icon(if is_open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .label(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_compaction(ix, cx)))
+                .into_any_element()
+        } else {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(label)
+                .into_any_element()
+        };
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_3()
+                    .child(rule())
+                    .child(title)
+                    .child(rule()),
+            )
+            .when_some(compaction.summary.filter(|_| is_open), |this, summary| {
+                this.child(
+                    div()
+                        .pl_3()
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(assistant_markdown(self.message_id(ix), summary)),
                 )
             })
             .into_any_element()
@@ -481,8 +577,55 @@ impl ThreadView {
     }
 }
 
+impl ThreadView {
+    /// What the selected thread's running turn has used so far, or `None`
+    /// between turns.
+    fn progress(&self, cx: &Context<Self>) -> Option<String> {
+        let thread = self
+            .app
+            .read(cx)
+            .selected_thread()
+            .filter(|thread| thread.status == ThreadStatus::Running)?;
+        let elapsed = thread.turn_elapsed().map_or(0, |elapsed| elapsed.as_secs());
+        Some(format::turn_progress(elapsed, thread.turn_tokens()))
+    }
+
+    /// Redraws once a second while a turn runs, so its time counts up.
+    fn tick_while(&mut self, is_working: bool, cx: &mut Context<Self>) {
+        if !is_working {
+            self.ticker = None;
+        } else if self.ticker.is_none() {
+            self.ticker = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        return;
+                    }
+                }
+            }));
+        }
+    }
+
+    /// A quiet line under the conversation: a spinner and the turn's time
+    /// and tokens. It stays in view however far the reader has scrolled up.
+    fn render_progress(&self, label: String, cx: &Context<Self>) -> AnyElement {
+        content_column()
+            .py_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Spinner::new().xsmall())
+                    .child(label),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for ThreadView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = self.progress(cx);
         let is_empty = self.shown.as_ref().is_none_or(|(_, len)| *len == 0);
         if is_empty {
             return v_flex()
@@ -494,9 +637,21 @@ impl Render for ThreadView {
                 .child("Send a message to start.")
                 .into_any_element();
         }
-        list(self.list.clone(), cx.processor(Self::render_item))
+        // Rows center themselves in the shared column, so the scroller's own
+        // side inset and gap between rows give way to the rows' own spacing.
+        let scroller = MessageScroller::new(
+            "thread",
+            self.scroller.clone(),
+            cx.processor(Self::render_item),
+        )
+        .with_list_style(StyleRefinement::default().py_4())
+        .with_row_style(StyleRefinement::default().px_0().pb_0());
+        v_flex()
             .size_full()
-            .py_4()
+            .child(div().flex_1().min_h_0().child(scroller))
+            .when_some(progress, |this, label| {
+                this.child(self.render_progress(label, cx))
+            })
             .into_any_element()
     }
 }
