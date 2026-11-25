@@ -110,6 +110,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-desk"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+]
+
+[[package]]
+name = "agent_desk_core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1521,6 +1536,10 @@ dependencies = [
  "smallvec",
  "zune-inflate",
 ]
+
+[[package]]
+name = "fake-claude"
+version = "0.1.0"
 
 [[package]]
 name = "fastrand"
@@ -4714,13 +4733,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "oct-code"
-version = "0.1.0"
-dependencies = [
- "gpui-kit",
 ]
 
 [[package]]
