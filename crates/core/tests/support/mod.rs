@@ -28,3 +28,11 @@ pub fn block_on_timeout<T>(future: impl Future<Output = T>) -> T {
         panic!("timed out after 10s");
     }))
 }
+
+/// Serializes tests that write an executable and then run one. Without it, a
+/// fork on another thread can inherit the open write handle and make exec
+/// fail with ETXTBSY ("Text file busy") on Linux.
+pub fn process_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}

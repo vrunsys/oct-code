@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 smol = "2.0.2"
 uuid = { version = "1.29.3", features = ["v4"] }
+which = "8.0.6"
 
 [dev-dependencies]
 escargot = "1.0.1"

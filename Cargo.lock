@@ -130,6 +130,7 @@ dependencies = [
  "smol",
  "tempfile",
  "uuid",
+ "which",
 ]
 
 [[package]]

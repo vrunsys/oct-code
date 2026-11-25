@@ -10,6 +10,7 @@ use smol::lock::Mutex;
 use smol::process::{Child, ChildStdin, Command, Stdio};
 
 use super::{AgentEvent, ClaudeConfig, build_args, parse_line};
+use crate::platform::background_command;
 
 /// How many trailing stderr lines an [`SessionEvent::Exited`] carries.
 const STDERR_TAIL_LINES: usize = 20;
@@ -60,7 +61,7 @@ impl ClaudeSession {
             return Err(SessionError::CwdMissing(cfg.cwd.clone()));
         }
 
-        let mut command = Command::new(&cfg.binary);
+        let mut command = Command::from(background_command(&cfg.binary));
         command
             .args(build_args(cfg))
             .current_dir(&cfg.cwd)
@@ -68,7 +69,6 @@ impl ClaudeSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        hide_console_window(&mut command);
 
         let mut child = command.spawn().map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => SessionError::NotFound(cfg.binary.clone()),
@@ -185,15 +185,3 @@ async fn collect_stderr_tail(stderr: smol::process::ChildStderr) -> String {
 fn io_error(error: std::io::Error) -> SessionError {
     SessionError::Io(error.to_string())
 }
-
-/// A GUI app spawning a console program on Windows flashes a console window
-/// unless told not to.
-#[cfg(windows)]
-fn hide_console_window(command: &mut Command) {
-    use smol::process::windows::CommandExt as _;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_console_window(_command: &mut Command) {}
