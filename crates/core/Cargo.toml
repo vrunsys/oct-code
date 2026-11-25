@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 async-channel = "2.5.0"
+dirs = "7.0.0"
+dunce = "1.0.5"
 log = "0.4.35"
 serde.workspace = true
 serde_json.workspace = true
