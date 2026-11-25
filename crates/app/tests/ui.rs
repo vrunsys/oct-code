@@ -321,7 +321,16 @@ fn a_compaction_divider_opens_to_its_summary_and_closes_again(cx: &mut TestAppCo
     let project = work.path().join("repo");
     fs::create_dir(&project).unwrap();
     let mut thread = Thread::new(project);
-    thread.push_user("hi");
+    for n in 0..30 {
+        thread.push_user(&format!("question {n}"));
+        thread.apply(&AgentEvent::AssistantText {
+            text: format!("answer {n}"),
+        });
+    }
+    // Last row of a thread that scrolls and sits at its end, so a row that
+    // grows pushes the divider up.
+    let marker_ix = thread.items.len();
+    let marker = format!("compaction-{marker_ix}");
     thread.apply(&AgentEvent::Compacted {
         trigger: "auto".into(),
         pre_tokens: Some(100),
@@ -343,12 +352,12 @@ fn a_compaction_divider_opens_to_its_summary_and_closes_again(cx: &mut TestAppCo
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.render_frame(cx);
-            window.find("compaction-1").bounds().origin.y
+            window.find(marker.clone()).bounds().origin.y
         })
         .unwrap()
     };
     let click_divider = |cx: &mut TestAppContext| {
-        cx.update_window(handle, |_, window, cx| window.click("compaction-1", cx))
+        cx.update_window(handle, |_, window, cx| window.click(marker.clone(), cx))
             .unwrap();
     };
 
@@ -363,4 +372,137 @@ fn a_compaction_divider_opens_to_its_summary_and_closes_again(cx: &mut TestAppCo
     );
     click_divider(cx);
     assert_eq!(divider_top(cx), closed, "closing it gives the room back");
+}
+
+#[gpui_kit::test]
+fn stop_takes_the_place_of_send_while_claude_works(cx: &mut TestAppContext) {
+    use agent_desk_core::thread::ThreadStatus;
+    use agent_desk_test_support::fake_claude_path;
+
+    cx.executor().allow_parking();
+    let root = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    fs::create_dir(work.path().join("repo")).unwrap();
+    let project = ProjectList::load(root.path().into())
+        .add(&work.path().join("repo"))
+        .unwrap()
+        .path;
+    cx.update(gpui_kit::init);
+    cx.update(agent_desk::theme::install);
+    cx.update(agent_desk::actions::bind_keys);
+    let app = cx.new(|_| {
+        AppState::load_with_history(root.path().into(), Some(fake_claude_path()), None)
+            .with_approver(test_approver())
+    });
+    let window_app = app.clone();
+    let (handle, _) = cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+            cx.new(|cx| WorkspaceView::new(window_app, None, window, cx))
+        })
+        .expect("open test window")
+    });
+    // The stand-in takes three seconds over this reply; Stop ends it sooner.
+    let id = app.update(cx, |app, cx| {
+        let id = app.new_thread(&project, cx);
+        app.send_message(&id, "slow 3".into(), cx);
+        id
+    });
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("stop-thread").visible());
+        assert!(window.try_find("send").is_none(), "Stop replaces Send");
+        assert_eq!(window.find_all("stop-thread").len(), 1, "and only once");
+        window.click("stop-thread", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let thread = app.read_with(cx, |app, _| {
+        app.threads().iter().find(|t| t.id == id).unwrap().clone()
+    });
+    assert_eq!(thread.status, ThreadStatus::Failed("Stopped".into()));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("stop-thread").is_none());
+        assert!(window.find("send").visible(), "Send comes back");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_long_thread_offers_a_jump_to_the_latest_message_when_scrolled_up(cx: &mut TestAppContext) {
+    use std::time::Duration;
+
+    use agent_desk_core::claude::AgentEvent;
+    use agent_desk_core::thread::{Thread, ThreadStatus};
+    use gpui_kit::{ElementId, ScrollDelta, point, px};
+
+    let root = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let project = work.path().join("repo");
+    fs::create_dir(&project).unwrap();
+    let mut thread = Thread::new(project);
+    for n in 0..40 {
+        thread.push_user(&format!("question {n}"));
+        thread.apply(&AgentEvent::AssistantText {
+            text: format!("answer {n}"),
+        });
+    }
+    // The last row has a button to scroll over: the harness finds only
+    // interactive elements.
+    let last_row = format!("compaction-{}", thread.items.len());
+    thread.apply(&AgentEvent::Compacted {
+        trigger: "auto".into(),
+        pre_tokens: None,
+        post_tokens: None,
+    });
+    thread.apply(&AgentEvent::CompactSummary {
+        text: "kept".into(),
+    });
+    thread.status = ThreadStatus::Idle;
+    let id = thread.id.clone();
+    ThreadStore::new(root.path().into()).save(&thread).unwrap();
+
+    let (handle, app) = open_workspace(root.path(), cx);
+    app.update(cx, |app, cx| app.select(&id, cx));
+    let jump = (ElementId::from("thread"), "jump-to-latest");
+
+    // Draws settled frames; the button fades in and out over 200 ms.
+    let draw = |cx: &mut TestAppContext| {
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .unwrap();
+        }
+    };
+    let has_jump_button = |cx: &mut TestAppContext| {
+        cx.update_window(handle, |_, window, _| {
+            window.try_find(jump.clone()).is_some()
+        })
+        .unwrap()
+    };
+
+    draw(cx);
+    assert!(!has_jump_button(cx), "a thread opens at its latest message");
+
+    cx.update_window(handle, |_, window, cx| {
+        window.scroll(
+            last_row.clone(),
+            ScrollDelta::Pixels(point(px(0.), px(2000.))),
+            cx,
+        )
+    })
+    .unwrap();
+    draw(cx);
+    assert!(has_jump_button(cx), "scrolled up, the way back is offered");
+
+    cx.update_window(handle, |_, window, cx| window.click(jump.clone(), cx))
+        .unwrap();
+    draw(cx);
+    assert!(
+        !has_jump_button(cx),
+        "jumping returns to the latest message"
+    );
 }
