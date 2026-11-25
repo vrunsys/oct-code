@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use agent_desk_core::thread::{ApprovalState, Item, ThreadId, ToolOutcome};
+use agent_desk_core::thread::{ApprovalState, Compaction, Item, ThreadId, ToolOutcome};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
@@ -79,6 +79,9 @@ pub struct ThreadView {
     full_output: HashSet<String>,
     /// Indexes of thinking items the user folded away.
     folded_thinking: HashSet<usize>,
+    /// Indexes of compactions whose summary the user opened; they start
+    /// closed, since the summary is long.
+    open_compactions: HashSet<usize>,
     _app_subscription: Subscription,
 }
 
@@ -95,6 +98,7 @@ impl ThreadView {
             expanded: HashSet::new(),
             full_output: HashSet::new(),
             folded_thinking: HashSet::new(),
+            open_compactions: HashSet::new(),
             _app_subscription: subscription,
         };
         this.sync(cx);
@@ -126,6 +130,7 @@ impl ThreadView {
                 self.expanded.clear();
                 self.full_output.clear();
                 self.folded_thinking.clear();
+                self.open_compactions.clear();
             }
         }
         self.shown = next;
@@ -143,6 +148,14 @@ impl ThreadView {
     fn toggle_thinking(&mut self, ix: usize, cx: &mut Context<Self>) {
         if !self.folded_thinking.remove(&ix) {
             self.folded_thinking.insert(ix);
+        }
+        self.list.remeasure_items(ix..ix + 1);
+        cx.notify();
+    }
+
+    fn toggle_compaction(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if !self.open_compactions.remove(&ix) {
+            self.open_compactions.insert(ix);
         }
         self.list.remeasure_items(ix..ix + 1);
         cx.notify();
@@ -173,6 +186,7 @@ impl ThreadView {
                 self.render_message("Claude", body, false, cx)
             }
             Item::Thinking(text) => self.render_thinking(ix, text, cx),
+            Item::Compacted(compaction) => self.render_compaction(ix, compaction, cx),
             Item::Stats(stats) => div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
@@ -264,6 +278,61 @@ impl ThreadView {
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(assistant_markdown(self.message_id(ix), text)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// A rule across the thread with what happened in the middle of it. The
+    /// summary Claude kept opens under it, and reads as Claude's own text.
+    fn render_compaction(
+        &self,
+        ix: usize,
+        compaction: Compaction,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let label = format::compaction(&compaction);
+        let is_open = self.open_compactions.contains(&ix);
+        let rule = || div().flex_1().h_px().bg(theme.border);
+        let title = if compaction.summary.is_some() {
+            Button::new(SharedString::from(format!("compaction-{ix}")))
+                .ghost()
+                .xsmall()
+                .icon(if is_open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .label(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_compaction(ix, cx)))
+                .into_any_element()
+        } else {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(label)
+                .into_any_element()
+        };
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_3()
+                    .child(rule())
+                    .child(title)
+                    .child(rule()),
+            )
+            .when_some(compaction.summary.filter(|_| is_open), |this, summary| {
+                this.child(
+                    div()
+                        .pl_3()
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(assistant_markdown(self.message_id(ix), summary)),
                 )
             })
             .into_any_element()

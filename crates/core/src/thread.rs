@@ -79,6 +79,20 @@ pub enum Item {
     },
     /// How long a finished turn took and what it used.
     Stats(TurnStats),
+    /// Older turns were replaced by a summary here.
+    Compacted(Compaction),
+}
+
+/// A compaction of the conversation, shown as a divider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Compaction {
+    /// `"auto"` or `"manual"`.
+    pub trigger: String,
+    pub pre_tokens: Option<u64>,
+    pub post_tokens: Option<u64>,
+    /// What Claude kept of the earlier turns. Known only when it was read
+    /// from Claude Code's session files.
+    pub summary: Option<String>,
 }
 
 /// Tokens used, counting the whole prompt (cached or not) as input.
@@ -280,6 +294,26 @@ impl Thread {
                 } else {
                     ThreadStatus::Idle
                 };
+            }
+            AgentEvent::Compacted {
+                trigger,
+                pre_tokens,
+                post_tokens,
+            } => self.push_finished(Item::Compacted(Compaction {
+                trigger: trigger.clone(),
+                pre_tokens: *pre_tokens,
+                post_tokens: *post_tokens,
+                summary: None,
+            })),
+            AgentEvent::CompactSummary { text } => {
+                // It belongs to the latest compaction still waiting for one.
+                let waiting = self.items.iter_mut().rev().find_map(|item| match item {
+                    Item::Compacted(compaction) => Some(&mut compaction.summary),
+                    _ => None,
+                });
+                if let Some(summary @ None) = waiting {
+                    *summary = Some(text.clone());
+                }
             }
             AgentEvent::Unknown { .. } => {}
         }

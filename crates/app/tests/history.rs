@@ -69,6 +69,28 @@ impl Fixture {
         file.write_all(body.as_bytes()).unwrap();
     }
 
+    fn append_lines(&self, session: &str, lines: &[serde_json::Value]) {
+        let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.history_dir().join(format!("{session}.jsonl")))
+            .unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+    }
+
+    /// A compaction as Claude Code records it: a boundary, then the summary.
+    fn compaction_lines(&self) -> [serde_json::Value; 2] {
+        [
+            json!({"type": "system", "subtype": "compact_boundary", "cwd": self.project,
+                   "compactMetadata": {"trigger": "auto", "preTokens": 100, "postTokens": 10}}),
+            json!({"type": "user", "cwd": self.project, "isCompactSummary": true,
+                   "isVisibleInTranscriptOnly": true,
+                   "message": {"role": "user", "content":
+                       "This session is being continued from a previous conversation."}}),
+        ]
+    }
+
     fn write_session(&self) {
         let dir = self.history_dir();
         let lines = [
@@ -357,4 +379,68 @@ fn turns_added_elsewhere_while_live_appear_once_the_session_ends(cx: &mut TestAp
         items.contains(&Item::Assistant("seen".into())),
         "{items:#?}"
     );
+}
+
+#[gpui_kit::test]
+fn a_compaction_in_a_terminal_session_shows_as_a_divider(cx: &mut TestAppContext) {
+    use agent_desk_core::thread::Compaction;
+
+    let fixture = Fixture::new();
+    fixture.append_lines(SESSION, &fixture.compaction_lines());
+    let app = fixture.load(cx, Some(fixture.root.path().join("no-claude")));
+    let project = fixture.project.clone();
+    app.update(cx, |app, cx| app.add_project(&project, cx));
+    cx.run_until_parked();
+
+    let items = items_of(cx, &app, SESSION);
+    assert_eq!(
+        items.last(),
+        Some(&Item::Compacted(Compaction {
+            trigger: "auto".into(),
+            pre_tokens: Some(100),
+            post_tokens: Some(10),
+            summary: Some("This session is being continued from a previous conversation.".into()),
+        }))
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, Item::User(text) if text.contains("continued"))),
+        "{items:#?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_thread_that_already_shows_the_compaction_is_not_rewritten(cx: &mut TestAppContext) {
+    use agent_desk_core::claude::AgentEvent;
+    use agent_desk_core::store::ThreadStore;
+    use agent_desk_core::thread::Thread;
+
+    let fixture = Fixture::new();
+    fixture.append_lines(SESSION, &fixture.compaction_lines());
+    // The thread was saved while running here, where the stream marks the
+    // compaction but doesn't carry its summary.
+    let mut thread = Thread::new(fixture.project.clone());
+    thread.push_user("what files are in this folder?");
+    thread.apply(&AgentEvent::AssistantText {
+        text: "Two files.".into(),
+    });
+    thread.apply(&AgentEvent::Compacted {
+        trigger: "auto".into(),
+        pre_tokens: Some(100),
+        post_tokens: None,
+    });
+    thread.session_id = Some(SESSION.into());
+    thread.status = ThreadStatus::Idle;
+    ThreadStore::new(fixture.root.path().to_path_buf())
+        .save(&thread)
+        .unwrap();
+
+    let app = fixture.load(cx, Some(fixture.root.path().join("no-claude")));
+    let project = fixture.project.clone();
+    app.update(cx, |app, cx| app.add_project(&project, cx));
+    cx.run_until_parked();
+
+    assert_eq!(app.read_with(cx, |app, _| app.rewrites()), 0);
+    assert_eq!(items_of(cx, &app, SESSION).len(), 3);
 }

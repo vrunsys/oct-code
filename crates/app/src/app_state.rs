@@ -360,7 +360,10 @@ impl AppState {
             .filter(|(_, item)| is_conversation(item))
             .collect();
         let is_extension = theirs.len() >= ours.len()
-            && theirs.iter().zip(&ours).all(|((_, new), old)| new == old);
+            && theirs
+                .iter()
+                .zip(&ours)
+                .all(|((_, new), old)| is_same_item(new, old));
         // Where history's first item this thread lacks sits in `fresh`.
         let first_new = theirs.get(ours.len()).map(|(position, _)| *position);
         if is_extension && first_new.is_none() {
@@ -763,6 +766,16 @@ impl AppState {
             log::warn!("saving thread {}: {error}", thread.id.0);
             self.last_error = Some(format!("Couldn’t save “{}”: {error}", thread.title));
         }
+    }
+}
+
+/// Whether history's `new` item is the one a thread already shows as `old`.
+/// A compaction counts as the same however much of it each side knows: the
+/// stream has no summary, and the session file has one.
+fn is_same_item(new: &Item, old: &Item) -> bool {
+    match (new, old) {
+        (Item::Compacted(_), Item::Compacted(_)) => true,
+        _ => new == old,
     }
 }
 

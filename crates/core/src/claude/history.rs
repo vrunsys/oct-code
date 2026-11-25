@@ -261,6 +261,15 @@ impl SessionReader {
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
+            Some("system")
+                if value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+                    && !is_true(&value, "isSidechain") =>
+            {
+                // Inside a turn: it neither starts nor ends one.
+                let events = parse_line(line).unwrap_or_default();
+                self.entries
+                    .extend(events.into_iter().map(HistoryEntry::Agent));
+            }
             // Claude Code marks some turn ends; others end at the next message.
             Some("system")
                 if matches!(
@@ -286,6 +295,15 @@ impl SessionReader {
                         self.entries.clear();
                         return;
                     }
+                }
+                // What Claude kept of the earlier turns. The person didn't
+                // write it, and it is not a turn of its own.
+                if kind == "user" && is_true(&value, "isCompactSummary") {
+                    if let Some(text) = user_text(&value) {
+                        self.entries
+                            .push(HistoryEntry::Agent(AgentEvent::CompactSummary { text }));
+                    }
+                    return;
                 }
                 if kind == "user"
                     && let Some(text) = user_text(&value)

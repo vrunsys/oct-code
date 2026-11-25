@@ -361,3 +361,95 @@ fn a_session_can_be_read_again_from_the_start() {
         [HistoryEntry::User("one".into()), text_two()]
     );
 }
+
+fn boundary(trigger: &str) -> Value {
+    json!({"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted",
+           "compactMetadata": {"trigger": trigger, "preTokens": 100, "postTokens": 10}})
+}
+
+fn compact_summary(history: &History, text: &str) -> Value {
+    let mut line = history.user(text);
+    line["isCompactSummary"] = json!(true);
+    line["isVisibleInTranscriptOnly"] = json!(true);
+    line
+}
+
+#[test]
+fn a_compaction_is_one_marker_with_its_summary_and_not_a_user_message() {
+    let h = History::new();
+    let summary = "This session is being continued from a previous conversation.";
+    h.write(
+        &format!("{ID}.jsonl"),
+        &[
+            h.user("one"),
+            h.assistant(json!([{"type": "text", "text": "two"}])),
+            boundary("auto"),
+            compact_summary(&h, summary),
+            h.user("three"),
+        ],
+    );
+
+    let entries = &h.sessions()[0].entries;
+    let without_turn_ends: Vec<_> = entries
+        .iter()
+        .filter(|entry| !matches!(entry, HistoryEntry::Agent(AgentEvent::TurnDone { .. })))
+        .cloned()
+        .collect();
+    assert_eq!(
+        without_turn_ends,
+        [
+            HistoryEntry::User("one".into()),
+            HistoryEntry::Agent(AgentEvent::AssistantText { text: "two".into() }),
+            HistoryEntry::Agent(AgentEvent::Compacted {
+                trigger: "auto".into(),
+                pre_tokens: Some(100),
+                post_tokens: Some(10),
+            }),
+            HistoryEntry::Agent(AgentEvent::CompactSummary {
+                text: summary.into()
+            }),
+            HistoryEntry::User("three".into()),
+        ]
+    );
+}
+
+#[test]
+fn a_compaction_does_not_split_the_turn_it_happens_in() {
+    let h = History::new();
+    let mut ask = h.user("one");
+    ask["timestamp"] = json!("2026-11-25T06:00:00.000Z");
+    let mut summary = compact_summary(&h, "summary");
+    summary["timestamp"] = json!("2026-11-25T06:01:30.000Z");
+    let mut reply = h.assistant(json!([{"type": "text", "text": "two"}]));
+    reply["timestamp"] = json!("2026-11-25T06:02:00.000Z");
+    let mut next = h.user("three");
+    next["timestamp"] = json!("2026-11-25T06:10:00.000Z");
+    h.write(
+        &format!("{ID}.jsonl"),
+        &[ask, boundary("auto"), summary, reply, next],
+    );
+
+    let turn_ends: Vec<u64> = h.sessions()[0]
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            HistoryEntry::Agent(AgentEvent::TurnDone { duration_ms, .. }) => Some(*duration_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        turn_ends,
+        [120_000],
+        "one turn, from the question to the reply"
+    );
+}
+
+#[test]
+fn a_session_with_only_a_summary_is_not_a_conversation() {
+    let h = History::new();
+    h.write(
+        &format!("{ID}.jsonl"),
+        &[boundary("auto"), compact_summary(&h, "summary")],
+    );
+    assert!(h.sessions().is_empty());
+}

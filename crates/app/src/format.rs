@@ -1,6 +1,6 @@
 //! Short, readable figures for time, tokens and cost.
 
-use agent_desk_core::thread::{TokenCount, TurnStats};
+use agent_desk_core::thread::{Compaction, TokenCount, TurnStats};
 
 /// `870` → "0.9s", `12_400` → "12s", `152_100` → "2m 32s".
 pub fn duration(ms: u64) -> String {
@@ -52,6 +52,20 @@ pub fn turn_summary(stats: &TurnStats) -> String {
     parts.join(" · ")
 }
 
+/// "Context compacted · 751.4k → 27.4k tokens · auto"; sizes appear when known.
+pub fn compaction(compaction: &Compaction) -> String {
+    let mut parts = vec!["Context compacted".to_owned()];
+    match (compaction.pre_tokens, compaction.post_tokens) {
+        (Some(before), Some(after)) => {
+            parts.push(format!("{} → {} tokens", tokens(before), tokens(after)));
+        }
+        (Some(before), None) => parts.push(format!("was {} tokens", tokens(before))),
+        _ => {}
+    }
+    parts.push(compaction.trigger.clone());
+    parts.join(" · ")
+}
+
 /// "Working · 12s · 43.1k in · 1.2k out" for a turn still running.
 pub fn turn_progress(elapsed_seconds: u64, used: TokenCount) -> String {
     let mut parts = vec!["Working".to_owned(), whole_seconds(elapsed_seconds)];
@@ -71,9 +85,9 @@ fn token_parts(used: TokenCount) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use agent_desk_core::thread::{TokenCount, TurnStats};
+    use agent_desk_core::thread::{Compaction, TokenCount, TurnStats};
 
-    use super::{cost, duration, tokens, turn_progress, turn_summary};
+    use super::{compaction, cost, duration, tokens, turn_progress, turn_summary};
 
     #[test]
     fn durations_read_naturally() {
@@ -113,6 +127,28 @@ mod tests {
         stats.cost_usd = None;
         stats.tokens = TokenCount::default();
         assert_eq!(turn_summary(&stats), "12s");
+    }
+
+    #[test]
+    fn a_compaction_reads_as_one_line() {
+        let mut marker = Compaction {
+            trigger: "auto".into(),
+            pre_tokens: Some(751_410),
+            post_tokens: Some(27_406),
+            summary: None,
+        };
+        assert_eq!(
+            compaction(&marker),
+            "Context compacted · 751.4k → 27.4k tokens · auto"
+        );
+        marker.post_tokens = None;
+        assert_eq!(
+            compaction(&marker),
+            "Context compacted · was 751.4k tokens · auto"
+        );
+        marker.pre_tokens = None;
+        marker.trigger = "manual".into();
+        assert_eq!(compaction(&marker), "Context compacted · manual");
     }
 
     #[test]

@@ -8,7 +8,7 @@ mod support;
 
 use agent_desk::app_state::AppState;
 use agent_desk::workspace_view::{WorkspaceView, new_thread_button_id};
-use agent_desk_core::store::ProjectList;
+use agent_desk_core::store::{ProjectList, ThreadStore};
 use agent_desk_core::thread::Item;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -309,4 +309,58 @@ fn mode_toggle_switches_between_supervised_and_full_access(cx: &mut TestAppConte
         cx.run_until_parked();
         assert_eq!(mode(cx), expected);
     }
+}
+
+#[gpui_kit::test]
+fn a_compaction_divider_opens_to_its_summary_and_closes_again(cx: &mut TestAppContext) {
+    use agent_desk_core::claude::AgentEvent;
+    use agent_desk_core::thread::Thread;
+
+    let root = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let project = work.path().join("repo");
+    fs::create_dir(&project).unwrap();
+    let mut thread = Thread::new(project);
+    thread.push_user("hi");
+    thread.apply(&AgentEvent::Compacted {
+        trigger: "auto".into(),
+        pre_tokens: Some(100),
+        post_tokens: Some(10),
+    });
+    thread.apply(&AgentEvent::CompactSummary {
+        text: "What was kept".into(),
+    });
+    let id = thread.id.clone();
+    ThreadStore::new(root.path().into()).save(&thread).unwrap();
+
+    let (handle, app) = open_workspace(root.path(), cx);
+    app.update(cx, |app, cx| app.select(&id, cx));
+    // A click's effects settle outside the window update, and a row whose
+    // height changed is measured on one frame and drawn on the next. So each
+    // step is click, settle, draw twice.
+    let divider_top = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.find("compaction-1").bounds().origin.y
+        })
+        .unwrap()
+    };
+    let click_divider = |cx: &mut TestAppContext| {
+        cx.update_window(handle, |_, window, cx| window.click("compaction-1", cx))
+            .unwrap();
+    };
+
+    // The thread is anchored to the bottom, so a row that grows (the summary
+    // opening under the divider) pushes the divider up.
+    let closed = divider_top(cx);
+    click_divider(cx);
+    let open = divider_top(cx);
+    assert!(
+        open < closed,
+        "opening the summary makes room: {open:?} vs {closed:?}"
+    );
+    click_divider(cx);
+    assert_eq!(divider_top(cx), closed, "closing it gives the room back");
 }
