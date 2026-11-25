@@ -69,6 +69,9 @@ pub struct Thread {
     /// The reasoning effort chosen for this thread; `None` uses the model's default.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Whether the last item is assistant text Claude is still writing.
+    #[serde(skip)]
+    streaming: bool,
 }
 
 impl Thread {
@@ -84,6 +87,7 @@ impl Thread {
             created_at: unix_millis_now(),
             model: None,
             effort: None,
+            streaming: false,
         }
     }
 
@@ -98,13 +102,28 @@ impl Thread {
         }
         self.items.push(Item::User(text.to_owned()));
         self.status = ThreadStatus::Running;
+        self.streaming = false;
     }
 
     pub fn apply(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::Init { session_id, .. } => self.session_id = Some(session_id.clone()),
-            AgentEvent::AssistantText { text } => self.items.push(Item::Assistant(text.clone())),
-            AgentEvent::ToolUse { id, name, input } => self.items.push(Item::Tool {
+            AgentEvent::AssistantDelta { text } => {
+                match self.items.last_mut() {
+                    Some(Item::Assistant(open)) if self.streaming => open.push_str(text),
+                    _ => self.items.push(Item::Assistant(text.clone())),
+                }
+                self.streaming = true;
+            }
+            // The finished block is the truth; it replaces what streamed in.
+            AgentEvent::AssistantText { text } => {
+                match self.items.last_mut() {
+                    Some(Item::Assistant(open)) if self.streaming => text.clone_into(open),
+                    _ => self.items.push(Item::Assistant(text.clone())),
+                }
+                self.streaming = false;
+            }
+            AgentEvent::ToolUse { id, name, input } => self.push_finished(Item::Tool {
                 id: id.clone(),
                 name: name.clone(),
                 input: input.clone(),
@@ -133,6 +152,7 @@ impl Thread {
                 cost_usd,
                 ..
             } => {
+                self.streaming = false;
                 self.cost_usd += cost_usd.unwrap_or(0.0);
                 self.status = if *is_error {
                     ThreadStatus::Failed(result.clone())
@@ -144,8 +164,14 @@ impl Thread {
         }
     }
 
+    fn push_finished(&mut self, item: Item) {
+        self.items.push(item);
+        self.streaming = false;
+    }
+
     /// The agent process ended. Only an exit in the middle of a turn is a failure.
     pub fn on_exit(&mut self, code: Option<i32>, stderr_tail: &str) {
+        self.streaming = false;
         if self.status != ThreadStatus::Running {
             return;
         }

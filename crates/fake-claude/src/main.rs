@@ -21,6 +21,7 @@ fn main() -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut initialized = false;
+    let streams = args.iter().any(|a| a == "--include-partial-messages");
 
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -47,6 +48,20 @@ fn main() -> ExitCode {
             "args" => args.join(" "),
             _ => format!("echo: {text}"),
         };
+        if streams {
+            // Like Claude Code: the text in pieces, then the whole block.
+            let mid = reply
+                .char_indices()
+                .nth(reply.chars().count() / 2)
+                .map_or(0, |(ix, _)| ix);
+            for piece in [&reply[..mid], &reply[mid..]] {
+                emit(
+                    &mut out,
+                    &json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                            "delta": {"type": "text_delta", "text": piece}}}),
+                );
+            }
+        }
         emit(
             &mut out,
             &json!({"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}}),

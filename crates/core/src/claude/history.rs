@@ -6,10 +6,11 @@
 //! folders can share a directory. Subagent (`isSidechain`) and meta lines,
 //! and command wrappers such as `<command-name>`, are not conversation.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -53,29 +54,80 @@ pub fn encode_project_dir(project: &Path) -> String {
 
 /// Every readable session Claude Code recorded for `project`.
 pub fn sessions_for_project(claude_home: &Path, project: &Path) -> Vec<HistorySession> {
-    let dir = claude_home
-        .join("projects")
-        .join(encode_project_dir(project));
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter_map(|path| {
-            let session_id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|_| path.extension().is_some_and(|ext| ext == "jsonl"))
-                .filter(|stem| is_valid_session_id(stem))?
-                .to_owned();
-            read_session(&path, session_id, project)
-        })
-        .collect()
+    HistoryWatcher::new(claude_home, project).poll()
 }
 
-fn read_session(path: &Path, session_id: String, project: &Path) -> Option<HistorySession> {
-    let metadata = fs::metadata(path).ok()?;
+/// Follows a project's history while Claude Code writes to it from
+/// elsewhere, such as the terminal or the VS Code extension. Each
+/// [`poll`](Self::poll) re-reads only the files that are new or changed.
+#[derive(Debug)]
+pub struct HistoryWatcher {
+    dir: PathBuf,
+    project: PathBuf,
+    /// Each session file's size and modification time at the last poll.
+    seen: HashMap<String, FileStamp>,
+}
+
+type FileStamp = (u64, Option<SystemTime>);
+
+impl HistoryWatcher {
+    pub fn new(claude_home: &Path, project: &Path) -> Self {
+        Self {
+            dir: claude_home
+                .join("projects")
+                .join(encode_project_dir(project)),
+            project: project.to_path_buf(),
+            seen: HashMap::new(),
+        }
+    }
+
+    /// The readable sessions whose files changed since the last poll; the
+    /// first poll returns every one.
+    pub fn poll(&mut self) -> Vec<HistorySession> {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            self.seen.clear();
+            return Vec::new();
+        };
+        let mut seen = HashMap::new();
+        let mut changed = Vec::new();
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            let Some(session_id) = session_id_of(&path) else {
+                continue;
+            };
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            let stamp = (metadata.len(), metadata.modified().ok());
+            // A file that was unreadable or someone else's stays skipped
+            // until it changes, so it is not read again on every poll.
+            if self.seen.get(&session_id) != Some(&stamp)
+                && let Some(session) =
+                    read_session(&path, session_id.clone(), &self.project, &metadata)
+            {
+                changed.push(session);
+            }
+            seen.insert(session_id, stamp);
+        }
+        self.seen = seen;
+        changed
+    }
+}
+
+/// The session id a history file is named after, if it is one.
+fn session_id_of(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|_| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .filter(|stem| is_valid_session_id(stem))
+        .map(str::to_owned)
+}
+
+fn read_session(
+    path: &Path,
+    session_id: String,
+    project: &Path,
+    metadata: &fs::Metadata,
+) -> Option<HistorySession> {
     if metadata.len() > MAX_SESSION_FILE_BYTES {
         log::warn!("skipping large session history {}", path.display());
         return None;

@@ -69,6 +69,8 @@ pub struct ThreadView {
     list: ListState,
     /// The thread and item count the list was last synced to.
     shown: Option<(ThreadId, usize)>,
+    /// [`AppState::rewrites`] when the list was last synced.
+    rewrites: u64,
     /// Tool-use ids whose output is expanded, and those showing every line.
     expanded: HashSet<String>,
     full_output: HashSet<String>,
@@ -84,6 +86,7 @@ impl ThreadView {
             app,
             list,
             shown: None,
+            rewrites: 0,
             expanded: HashSet::new(),
             full_output: HashSet::new(),
             _app_subscription: subscription,
@@ -92,17 +95,22 @@ impl ThreadView {
         this
     }
 
-    /// Brings the list's item count in line with the selected thread.
+    /// Brings the list in line with the selected thread.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let next = self
-            .app
-            .read(cx)
+        let app = self.app.read(cx);
+        let rewrites = app.rewrites();
+        let next = app
             .selected_thread()
             .map(|thread| (thread.id.clone(), thread.items.len()));
+        let is_rewritten = std::mem::replace(&mut self.rewrites, rewrites) != rewrites;
         match (&self.shown, &next) {
             (Some((shown_id, shown_len)), Some((id, len)))
-                if shown_id == id && len >= shown_len =>
+                if shown_id == id && len >= shown_len && !is_rewritten =>
             {
+                // The last message may still be growing as Claude writes it.
+                if let Some(last) = shown_len.checked_sub(1) {
+                    self.list.remeasure_items(last..*shown_len);
+                }
                 if len > shown_len {
                     self.list.splice(*shown_len..*shown_len, len - shown_len);
                 }

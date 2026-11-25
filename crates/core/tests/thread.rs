@@ -152,3 +152,59 @@ fn thread_saved_before_created_at_still_loads() {
     let loaded: Thread = serde_json::from_value(value).unwrap();
     assert_eq!(loaded.created_at, 0);
 }
+
+fn delta(text: &str) -> AgentEvent {
+    AgentEvent::AssistantDelta { text: text.into() }
+}
+
+fn full_text(text: &str) -> AgentEvent {
+    AgentEvent::AssistantText { text: text.into() }
+}
+
+#[test]
+fn streamed_text_grows_one_message_until_the_full_text_replaces_it() {
+    let mut t = thread();
+    t.push_user("hi");
+    t.apply(&delta("Hel"));
+    t.apply(&delta("lo"));
+    assert_eq!(t.items.last(), Some(&Item::Assistant("Hello".into())));
+    t.apply(&full_text("Hello!"));
+    assert_eq!(
+        t.items,
+        [Item::User("hi".into()), Item::Assistant("Hello!".into())]
+    );
+}
+
+#[test]
+fn text_after_a_finished_block_or_a_tool_call_is_a_new_message() {
+    let mut t = thread();
+    t.push_user("hi");
+    t.apply(&delta("one"));
+    t.apply(&full_text("one"));
+    t.apply(&delta("two"));
+    t.apply(&full_text("two"));
+    t.apply(&AgentEvent::ToolUse {
+        id: "t1".into(),
+        name: "Bash".into(),
+        input: json!({}),
+    });
+    t.apply(&delta("three"));
+    let texts: Vec<_> = t
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Assistant(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["one", "two", "three"]);
+}
+
+#[test]
+fn unstreamed_text_is_appended_as_before() {
+    let mut t = thread();
+    t.push_user("hi");
+    t.apply(&full_text("a"));
+    t.apply(&full_text("b"));
+    assert_eq!(t.items.len(), 3);
+}

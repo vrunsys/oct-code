@@ -51,7 +51,7 @@ fn assistant_texts(events: &[SessionEvent]) -> Vec<String> {
 }
 
 #[test]
-fn echo_roundtrip() {
+fn echo_roundtrip_streams_text_then_the_whole_block() {
     let dir = tempfile::tempdir().unwrap();
     let (_session, events) = ClaudeSession::start(&config(dir.path().into(), None)).unwrap();
     block_on_timeout(async {
@@ -62,9 +62,13 @@ fn echo_roundtrip() {
                 seen.as_slice(),
                 [
                     SessionEvent::Agent(AgentEvent::Init { session_id, .. }),
+                    SessionEvent::Agent(AgentEvent::AssistantDelta { text: first }),
+                    SessionEvent::Agent(AgentEvent::AssistantDelta { text: second }),
                     SessionEvent::Agent(AgentEvent::AssistantText { text }),
                     SessionEvent::Agent(AgentEvent::TurnDone { .. }),
-                ] if session_id == "fake-session-1" && text == "echo: hi"
+                ] if session_id == "fake-session-1"
+                    && format!("{first}{second}") == "echo: hi"
+                    && text == "echo: hi"
             ),
             "unexpected events: {seen:?}"
         );

@@ -16,6 +16,12 @@ pub enum AgentEvent {
         session_id: String,
         model: String,
     },
+    /// The next piece of a text block still being written. The whole block
+    /// follows as [`AgentEvent::AssistantText`] once it is done.
+    AssistantDelta {
+        text: String,
+    },
+    /// A finished text block.
     AssistantText {
         text: String,
     },
@@ -89,6 +95,14 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>, ParseError> {
             .filter(|block| str_field(block, "type") == Some("tool_result"))
             .map(parse_tool_result)
             .collect(),
+        // Sent with `--include-partial-messages`. Only text is shown as it
+        // arrives; tool calls and thinking wait for their finished block.
+        "stream_event" => Ok(text_delta(&value)
+            .map(|text| AgentEvent::AssistantDelta {
+                text: text.to_owned(),
+            })
+            .into_iter()
+            .collect()),
         "result" => Ok(vec![AgentEvent::TurnDone {
             is_error: value
                 .get("is_error")
@@ -105,6 +119,15 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>, ParseError> {
             raw_type: other.to_owned(),
         }]),
     }
+}
+
+fn text_delta(value: &Value) -> Option<&str> {
+    let event = value.get("event")?;
+    let delta = event.get("delta")?;
+    (str_field(event, "type") == Some("content_block_delta")
+        && str_field(delta, "type") == Some("text_delta"))
+    .then(|| str_field(delta, "text"))
+    .flatten()
 }
 
 fn parse_tool_use(block: &Value) -> Result<AgentEvent, ParseError> {

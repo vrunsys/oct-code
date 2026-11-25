@@ -59,8 +59,8 @@ impl WorkspaceView {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 
-        // Sessions started outside Agent Desk since the last launch.
-        app.update(cx, |app, cx| app.import_all_history(cx));
+        // Sessions and turns added outside Agent Desk, now and while it runs.
+        app.update(cx, |app, cx| app.watch_history(cx));
 
         let applied_appearance = appearance_override.unwrap_or(app.read(cx).appearance());
         apply_appearance(applied_appearance, window, cx);

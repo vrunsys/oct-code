@@ -26,6 +26,7 @@ fn base_args_full_access() {
             "--output-format",
             "stream-json",
             "--verbose",
+            "--include-partial-messages",
             "--permission-mode",
             "bypassPermissions"
         ]

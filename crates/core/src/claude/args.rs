@@ -48,6 +48,8 @@ pub fn build_args(cfg: &ClaudeConfig) -> Vec<String> {
         "--output-format",
         "stream-json",
         "--verbose",
+        // Text as Claude writes it, not only once a block is finished.
+        "--include-partial-messages",
     ]
     .map(str::to_owned)
     .into();

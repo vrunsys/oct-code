@@ -2,6 +2,8 @@ use agent_desk_core::claude::{AgentEvent, ParseError, parse_line};
 
 const BASIC: &str = include_str!("fixtures/claude_basic.jsonl");
 const TOOL: &str = include_str!("fixtures/claude_tool.jsonl");
+/// Captured with `--include-partial-messages`.
+const PARTIAL: &str = include_str!("fixtures/claude_partial.jsonl");
 
 fn parse_all(fixture: &str) -> Vec<AgentEvent> {
     fixture
@@ -93,4 +95,41 @@ fn blank_line_yields_nothing() {
 #[test]
 fn malformed_json_is_err() {
     assert!(matches!(parse_line("{nope"), Err(ParseError::Json(_))));
+}
+
+#[test]
+fn partial_text_arrives_as_deltas_before_the_full_text() {
+    let events = parse_all(PARTIAL);
+    let streamed: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::AssistantDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let first_delta = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::AssistantDelta { .. }))
+        .expect("a delta");
+    let (full_at, full) = events
+        .iter()
+        .enumerate()
+        .find_map(|(ix, e)| match e {
+            AgentEvent::AssistantText { text } => Some((ix, text.clone())),
+            _ => None,
+        })
+        .expect("the full text");
+    assert!(first_delta < full_at);
+    assert_eq!(streamed, full);
+}
+
+#[test]
+fn stream_events_other_than_text_yield_nothing() {
+    for line in [
+        r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}}"#,
+    ] {
+        assert_eq!(parse_line(line), Ok(Vec::new()), "{line}");
+    }
 }

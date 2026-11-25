@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agent_desk_core::claude::AgentEvent;
-use agent_desk_core::claude::history::{HistoryEntry, encode_project_dir, sessions_for_project};
+use agent_desk_core::claude::history::{
+    HistoryEntry, HistoryWatcher, encode_project_dir, sessions_for_project,
+};
 use serde_json::{Value, json};
 
 struct History {
@@ -183,4 +185,35 @@ fn malformed_lines_are_skipped_and_empty_sessions_dropped() {
 fn missing_history_is_empty() {
     let h = History::new();
     assert!(h.sessions().is_empty());
+}
+
+#[test]
+fn a_watcher_reports_a_session_again_only_after_its_file_changes() {
+    let history = History::new();
+    history.write(&format!("{ID}.jsonl"), &[history.user("one")]);
+    let mut watcher = HistoryWatcher::new(history.home.path(), &history.project);
+
+    assert_eq!(watcher.poll().len(), 1, "first poll reports what exists");
+    assert!(watcher.poll().is_empty(), "nothing changed");
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(history.dir().join(format!("{ID}.jsonl")))
+        .unwrap();
+    let reply = history.assistant(json!([{"type": "text", "text": "two"}]));
+    std::io::Write::write_all(&mut file, format!("{reply}\n").as_bytes()).unwrap();
+
+    let changed = watcher.poll();
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].entries.len(), 2);
+    assert!(watcher.poll().is_empty());
+}
+
+#[test]
+fn a_watcher_reports_a_session_created_after_it_started() {
+    let history = History::new();
+    let mut watcher = HistoryWatcher::new(history.home.path(), &history.project);
+    assert!(watcher.poll().is_empty());
+    history.write(&format!("{ID}.jsonl"), &[history.user("hello")]);
+    assert_eq!(watcher.poll().len(), 1);
 }

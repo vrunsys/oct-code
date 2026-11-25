@@ -8,9 +8,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 use agent_desk_core::claude::catalog::{self, ModelCatalog};
-use agent_desk_core::claude::history::{self, HistoryEntry, HistorySession};
+use agent_desk_core::claude::history::{self, HistoryEntry, HistorySession, HistoryWatcher};
 use agent_desk_core::claude::{
     AgentEvent, ClaudeConfig, ClaudeSession, PermissionSetup, SessionError, SessionEvent,
     is_plain_token, is_valid_session_id,
@@ -19,12 +20,16 @@ use agent_desk_core::detect::{AgentStatus, detect_claude};
 use agent_desk_core::settings::{Appearance, Settings};
 use agent_desk_core::store::{Project, ProjectList, ThreadStore};
 use agent_desk_core::thread::{Thread, ThreadId, ThreadStatus};
-use gpui_kit::{AppContext as _, Context};
+use gpui_kit::{AppContext as _, Context, Task};
 
 /// The binary name used when detection found nothing and no override is set;
 /// starting it then fails with a "not found" hint rather than running
 /// something unexpected.
 const DEFAULT_CLAUDE_BINARY: &str = "claude";
+
+/// How often Claude Code's history is checked for turns and sessions added
+/// outside Agent Desk. A check only reads the files that changed.
+const HISTORY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A running Claude process for one thread.
 struct LiveSession {
@@ -52,6 +57,10 @@ pub struct AppState {
     history_home: Option<PathBuf>,
     /// The models and reasoning levels Claude Code offers this account.
     catalog: ModelCatalog,
+    /// Follows Claude Code's history while the app runs; dropped with it.
+    history_watch: Option<Task<()>>,
+    /// Counts the times a thread's items were replaced rather than added to.
+    rewrites: u64,
 }
 
 impl AppState {
@@ -93,6 +102,8 @@ impl AppState {
                 .and_then(catalog::load_catalog)
                 .unwrap_or_else(ModelCatalog::fallback),
             history_home,
+            history_watch: None,
+            rewrites: 0,
         }
     }
 
@@ -128,6 +139,12 @@ impl AppState {
     }
 
     /// Whether the thread has a running Claude process.
+    /// Changes whenever a thread's items are replaced rather than added to,
+    /// so a view that caches item layout knows to start over.
+    pub fn rewrites(&self) -> u64 {
+        self.rewrites
+    }
+
     pub fn is_live(&self, id: &ThreadId) -> bool {
         self.sessions.contains_key(id)
     }
@@ -163,16 +180,56 @@ impl AppState {
         cx.notify();
     }
 
-    /// Imports sessions started outside Agent Desk for every project.
-    pub fn import_all_history(&mut self, cx: &mut Context<Self>) {
-        let projects: Vec<PathBuf> = self
-            .projects()
-            .iter()
-            .map(|project| project.path.clone())
-            .collect();
-        for project in projects {
-            self.import_history(project, cx);
+    /// Shows every project's Claude Code sessions, then keeps following
+    /// them: a turn or session added in the terminal or the VS Code
+    /// extension appears within [`HISTORY_POLL_INTERVAL`]. Calling it again
+    /// while it runs does nothing.
+    pub fn watch_history(&mut self, cx: &mut Context<Self>) {
+        let Some(home) = self.history_home.clone() else {
+            return;
+        };
+        if self.history_watch.is_some() {
+            return;
         }
+        self.history_watch = Some(cx.spawn(async move |this, cx| {
+            let mut watchers: HashMap<PathBuf, HistoryWatcher> = HashMap::new();
+            loop {
+                let Ok(projects) = this.read_with(cx, |this, _| {
+                    this.projects()
+                        .iter()
+                        .map(|project| project.path.clone())
+                        .collect::<Vec<_>>()
+                }) else {
+                    return;
+                };
+                watchers.retain(|project, _| projects.contains(project));
+                for project in projects {
+                    watchers
+                        .entry(project)
+                        .or_insert_with_key(|project| HistoryWatcher::new(&home, project));
+                }
+                let (polled, changes) = cx
+                    .background_spawn(async move {
+                        let changes: Vec<_> = watchers
+                            .iter_mut()
+                            .map(|(project, watcher)| (project.clone(), watcher.poll()))
+                            .filter(|(_, sessions)| !sessions.is_empty())
+                            .collect();
+                        (watchers, changes)
+                    })
+                    .await;
+                watchers = polled;
+                let applied = this.update(cx, |this, cx| {
+                    for (project, sessions) in changes {
+                        this.merge_history_sessions(&project, sessions, cx);
+                    }
+                });
+                if applied.is_err() {
+                    return;
+                }
+                cx.background_executor().timer(HISTORY_POLL_INTERVAL).await;
+            }
+        }));
     }
 
     /// Reads the project's Claude Code history off the UI thread, then adds
@@ -189,34 +246,61 @@ impl AppState {
                 )
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.add_history_sessions(&project, sessions, cx)
+                this.merge_history_sessions(&project, sessions, cx)
             });
         })
         .detach();
     }
 
-    fn add_history_sessions(
+    /// Adds sessions that are not threads yet and brings the others up to
+    /// date.
+    fn merge_history_sessions(
         &mut self,
         project: &Path,
         sessions: Vec<HistorySession>,
         cx: &mut Context<Self>,
     ) {
-        let mut added = false;
+        let mut changed = false;
         for session in sessions {
-            let is_known = self
-                .threads
-                .iter()
-                .any(|thread| thread.session_id.as_deref() == Some(session.session_id.as_str()));
-            if is_known {
-                continue;
+            let known = self.threads.iter().position(|thread| {
+                thread.session_id.as_deref() == Some(session.session_id.as_str())
+            });
+            match known {
+                Some(ix) => changed |= self.refresh_from_history(ix, session),
+                None => {
+                    self.threads.push(thread_from_history(project, session));
+                    self.save_thread(self.threads.len() - 1);
+                    changed = true;
+                }
             }
-            self.threads.push(thread_from_history(project, session));
-            self.save_thread(self.threads.len() - 1);
-            added = true;
         }
-        if added {
+        if changed {
             cx.notify();
         }
+    }
+
+    /// Gives a thread the turns its session gained outside Agent Desk. A
+    /// thread with a turn running here is left alone: its own stream is
+    /// newer than the file Claude is still writing.
+    fn refresh_from_history(&mut self, ix: usize, session: HistorySession) -> bool {
+        let thread = &self.threads[ix];
+        if self.is_live(&thread.id) || thread.status == ThreadStatus::Running {
+            return false;
+        }
+        let fresh = thread_from_history(&thread.project, session);
+        if fresh.items == thread.items {
+            return false;
+        }
+        if !fresh.items.starts_with(&thread.items) {
+            self.rewrites += 1;
+        }
+        let thread = &mut self.threads[ix];
+        thread.items = fresh.items;
+        thread.title = fresh.title;
+        // Newer turns supersede how the last one here ended.
+        thread.status = fresh.status;
+        self.save_thread(ix);
+        true
     }
 
     /// Creates an empty thread in `project`, selects it and saves it.
