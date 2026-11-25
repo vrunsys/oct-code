@@ -20,7 +20,10 @@ fn open_workspace(root: &Path, cx: &mut TestAppContext) -> (AnyWindowHandle, Ent
     cx.update(agent_desk::actions::bind_keys);
     let root = root.to_path_buf();
     let missing_claude = root.join("no-claude-here");
-    let app = cx.new(|_| AppState::load_with_history(root, Some(missing_claude), None));
+    let claude_home = root.join("claude-home");
+    agent_desk_test_support::write_model_catalog(&claude_home);
+    let app =
+        cx.new(|_| AppState::load_with_history(root, Some(missing_claude), Some(claude_home)));
     let window_app = app.clone();
     let (handle, _) = cx.update(|cx| {
         gpui_kit::open_window(
@@ -112,35 +115,39 @@ fn new_thread_shortcut_creates_a_thread(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn appearance_menu_switches_and_saves_the_theme(cx: &mut TestAppContext) {
+fn appearance_button_toggles_and_saves_the_theme(cx: &mut TestAppContext) {
     use agent_desk_core::settings::{Appearance, Settings};
-    use gpui_kit::MouseButton;
     use gpui_kit::component::Theme;
-    use gpui_kit::test::{TestEventExt, TestQueryExt};
 
     let root = tempfile::tempdir().unwrap();
     let (handle, app) = open_workspace(root.path(), cx);
+    let is_dark = |cx: &mut TestAppContext| cx.update(|cx| Theme::global(cx).mode.is_dark());
+    let started_dark = is_dark(cx);
+
+    // One click switches mode: no menu to open.
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         window.click("appearance", cx);
     })
     .unwrap();
     cx.run_until_parked();
+    assert_eq!(is_dark(cx), !started_dark);
+    let saved = if started_dark {
+        Appearance::Light
+    } else {
+        Appearance::Dark
+    };
+    assert_eq!(app.read_with(cx, |app, _| app.appearance()), saved);
+    assert_eq!(Settings::load(root.path()).appearance, saved);
+
+    // A second click switches back.
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
-        let dark = window.find_by_label("Dark").bounds().center();
-        window.pointer_down(dark, MouseButton::Left, cx);
-        window.pointer_up(dark, MouseButton::Left, cx);
+        window.click("appearance", cx);
     })
     .unwrap();
     cx.run_until_parked();
-
-    assert_eq!(
-        app.read_with(cx, |app, _| app.appearance()),
-        Appearance::Dark
-    );
-    assert!(cx.update(|cx| Theme::global(cx).mode.is_dark()));
-    assert_eq!(Settings::load(root.path()).appearance, Appearance::Dark);
+    assert_eq!(is_dark(cx), started_dark);
 }
 
 #[gpui_kit::test]
@@ -214,7 +221,7 @@ fn model_menu_sets_the_threads_model(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
-        let opus = window.find_by_label("Opus").bounds().center();
+        let opus = window.find_by_label("Opus 5.5").bounds().center();
         window.pointer_down(opus, MouseButton::Left, cx);
         window.pointer_up(opus, MouseButton::Left, cx);
     })
@@ -229,5 +236,5 @@ fn model_menu_sets_the_threads_model(cx: &mut TestAppContext) {
             .model
             .clone()
     });
-    assert_eq!(model.as_deref(), Some("opus"));
+    assert_eq!(model.as_deref(), Some("claude-opus-5-5"));
 }

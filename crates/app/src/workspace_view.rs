@@ -10,7 +10,6 @@ use agent_desk_core::detect::AgentStatus;
 use agent_desk_core::settings::Appearance;
 use agent_desk_core::thread::{Thread, ThreadId, ThreadStatus};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
@@ -20,15 +19,12 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    Anchor, AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
+    AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
     SharedString, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
 };
 
-use crate::actions::{
-    AddProject, NewThread, StopThread, UseDarkAppearance, UseLightAppearance, UseSystemAppearance,
-    WORKSPACE_CONTEXT,
-};
+use crate::actions::{AddProject, NewThread, StopThread, ToggleAppearance, WORKSPACE_CONTEXT};
 use crate::app_state::AppState;
 use crate::appearance::apply_appearance;
 use crate::claude_banner::ClaudeBanner;
@@ -265,7 +261,7 @@ impl WorkspaceView {
                     .p_2()
                     .justify_between()
                     .child(self.render_claude_status(cx))
-                    .child(self.render_appearance_menu(cx)),
+                    .child(self.render_appearance_toggle(cx)),
             )
     }
 
@@ -297,40 +293,36 @@ impl WorkspaceView {
             .child(div().truncate().child(label))
     }
 
-    /// Light, dark or follow the system, in a menu with the current choice
-    /// checked. The icon shows the current choice at a glance.
-    fn render_appearance_menu(&self, cx: &Context<Self>) -> impl IntoElement {
-        let current = self.appearance(cx);
-        let icon = match current {
-            // The bundled icon set has no sun-and-moon glyph; the palette reads as "appearance".
-            Appearance::System => IconName::Palette,
-            Appearance::Light => IconName::Sun,
-            Appearance::Dark => IconName::Moon,
-        };
-        let focus_handle = self.focus_handle.clone();
+    /// One click switches between light and dark. The icon shows the
+    /// current mode; the tooltip names the result.
+    fn render_appearance_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+        let is_dark = cx.theme().mode.is_dark();
         Button::new("appearance")
             .ghost()
             .xsmall()
-            .icon(icon)
-            .tooltip("Appearance")
-            .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                menu.action_context(focus_handle.clone())
-                    .menu_with_check(
-                        "System",
-                        current == Appearance::System,
-                        Box::new(UseSystemAppearance),
-                    )
-                    .menu_with_check(
-                        "Light",
-                        current == Appearance::Light,
-                        Box::new(UseLightAppearance),
-                    )
-                    .menu_with_check(
-                        "Dark",
-                        current == Appearance::Dark,
-                        Box::new(UseDarkAppearance),
-                    )
+            .icon(if is_dark {
+                IconName::Moon
+            } else {
+                IconName::Sun
             })
+            .accessibility_label("Toggle light or dark mode")
+            .tooltip(if is_dark {
+                "Switch to light mode"
+            } else {
+                "Switch to dark mode"
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_appearance(window, cx)))
+    }
+
+    /// Switches to the opposite of what is showing; from then on the choice
+    /// is saved and no longer follows the system.
+    fn toggle_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = if cx.theme().mode.is_dark() {
+            Appearance::Light
+        } else {
+            Appearance::Dark
+        };
+        self.choose_appearance(next, window, cx);
     }
 
     fn render_thread_header(&self, thread: &Thread, cx: &mut Context<Self>) -> AnyElement {
@@ -476,14 +468,8 @@ impl Render for WorkspaceView {
                 }),
             )
             .on_action(cx.listener(|this, _: &StopThread, _, cx| this.stop_selected_thread(cx)))
-            .on_action(cx.listener(|this, _: &UseSystemAppearance, window, cx| {
-                this.choose_appearance(Appearance::System, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &UseLightAppearance, window, cx| {
-                this.choose_appearance(Appearance::Light, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &UseDarkAppearance, window, cx| {
-                this.choose_appearance(Appearance::Dark, window, cx)
+            .on_action(cx.listener(|this, _: &ToggleAppearance, window, cx| {
+                this.toggle_appearance(window, cx)
             }))
             .items_stretch()
             .size_full()

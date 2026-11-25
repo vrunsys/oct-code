@@ -63,9 +63,12 @@ pub struct Thread {
     /// Creation time in Unix milliseconds; 0 for threads saved before this field existed.
     #[serde(default)]
     pub created_at: u64,
-    /// The model alias chosen for this thread; `None` uses Claude's default.
+    /// The model id chosen for this thread; `None` uses Claude's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// The reasoning effort chosen for this thread; `None` uses the model's default.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 impl Thread {
@@ -80,6 +83,7 @@ impl Thread {
             cost_usd: 0.0,
             created_at: unix_millis_now(),
             model: None,
+            effort: None,
         }
     }
 

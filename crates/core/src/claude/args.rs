@@ -17,17 +17,27 @@ pub struct ClaudeConfig {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub resume: Option<String>,
-    /// A model alias from [`MODEL_ALIASES`]; anything else is not passed.
+    /// A model id from Claude Code's catalog; a value that is not a plain
+    /// token is not passed.
     pub model: Option<String>,
+    /// A reasoning level from Claude Code's catalog; a value that is not a
+    /// plain token is not passed.
+    pub effort: Option<String>,
     pub permission: PermissionSetup,
 }
 
-/// The model aliases Agent Desk offers, as Claude Code's `--model` takes them.
-pub const MODEL_ALIASES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+/// Longest value accepted for `--model` or `--effort`.
+const CLI_VALUE_MAX_LEN: usize = 100;
 
-/// Whether `model` is one of [`MODEL_ALIASES`].
-pub fn is_known_model(model: &str) -> bool {
-    MODEL_ALIASES.contains(&model)
+/// Whether `value` is safe as the value of `--model` or `--effort`: it must
+/// start with a letter or digit and contain only letters, digits, `-`, `.`
+/// and `_`, so it can never be read as a flag.
+pub fn is_plain_token(value: &str) -> bool {
+    value.len() <= CLI_VALUE_MAX_LEN
+        && value.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
 }
 
 pub fn build_args(cfg: &ClaudeConfig) -> Vec<String> {
@@ -59,8 +69,17 @@ pub fn build_args(cfg: &ClaudeConfig) -> Vec<String> {
         }
     }
 
-    if let Some(model) = cfg.model.as_deref().filter(|model| is_known_model(model)) {
+    // Thread files are outside the app's control once written, so a stored
+    // value must never become a flag.
+    if let Some(model) = cfg.model.as_deref().filter(|model| is_plain_token(model)) {
         args.extend(["--model".to_owned(), model.to_owned()]);
+    }
+    if let Some(effort) = cfg
+        .effort
+        .as_deref()
+        .filter(|effort| is_plain_token(effort))
+    {
+        args.extend(["--effort".to_owned(), effort.to_owned()]);
     }
     if let Some(session_id) = &cfg.resume {
         args.extend(["--resume".to_owned(), session_id.clone()]);

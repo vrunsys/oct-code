@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use agent_desk_core::claude::{ClaudeConfig, PermissionSetup, build_args, is_valid_session_id};
+use agent_desk_core::claude::{
+    ClaudeConfig, PermissionSetup, build_args, is_plain_token, is_valid_session_id,
+};
 
 fn config(resume: Option<&str>, permission: PermissionSetup) -> ClaudeConfig {
     ClaudeConfig {
@@ -8,6 +10,7 @@ fn config(resume: Option<&str>, permission: PermissionSetup) -> ClaudeConfig {
         cwd: PathBuf::from("/tmp/project"),
         resume: resume.map(str::to_owned),
         model: None,
+        effort: None,
         permission,
     }
 }
@@ -80,12 +83,12 @@ fn ids_that_could_inject_arguments_are_invalid() {
 }
 
 #[test]
-fn model_alias_appends_flag() {
+fn model_appends_flag() {
     let mut cfg = config(None, PermissionSetup::FullAccess);
-    cfg.model = Some("opus".into());
+    cfg.model = Some("claude-opus-5-5".into());
     let args = build_args(&cfg);
     let at = args.iter().position(|a| a == "--model").expect("--model");
-    assert_eq!(args[at + 1], "opus");
+    assert_eq!(args[at + 1], "claude-opus-5-5");
 }
 
 #[test]
@@ -98,4 +101,34 @@ fn unknown_model_is_not_passed() {
             .iter()
             .any(|a| a == "--model" || a.contains("dangerously"))
     );
+}
+
+#[test]
+fn effort_appends_flag() {
+    let mut cfg = config(None, PermissionSetup::FullAccess);
+    cfg.effort = Some("xhigh".into());
+    let args = build_args(&cfg);
+    let at = args.iter().position(|a| a == "--effort").expect("--effort");
+    assert_eq!(args[at + 1], "xhigh");
+}
+
+#[test]
+fn unknown_effort_is_not_passed() {
+    let mut cfg = config(None, PermissionSetup::FullAccess);
+    cfg.effort = Some("--evil".into());
+    assert!(
+        !build_args(&cfg)
+            .iter()
+            .any(|a| a == "--effort" || a == "--evil")
+    );
+}
+
+#[test]
+fn catalog_style_values_are_plain_tokens() {
+    assert!(is_plain_token("claude-haiku-4-5-20251001"));
+    assert!(is_plain_token("opus"));
+    assert!(is_plain_token("xhigh"));
+    assert!(!is_plain_token("--model"));
+    assert!(!is_plain_token("opus --dangerously-skip-permissions"));
+    assert!(!is_plain_token(""));
 }

@@ -17,4 +17,5 @@ which = "8.0.6"
 
 [dev-dependencies]
 agent_desk_test_support = { path = "../test-support" }
+serde_json.workspace = true
 tempfile = "3.27.0"

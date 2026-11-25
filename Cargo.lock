@@ -144,6 +144,7 @@ name = "agent_desk_test_support"
 version = "0.1.0"
 dependencies = [
  "escargot",
+ "serde_json",
  "smol",
 ]
 

@@ -1,7 +1,7 @@
 //! The message box under a thread: the text, the thread's model, and Send.
 //! Enter sends; Shift+Enter adds a line.
 
-use agent_desk_core::claude::MODEL_ALIASES;
+use agent_desk_core::claude::catalog::ModelCatalog;
 use agent_desk_core::thread::ThreadStatus;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -87,49 +87,82 @@ impl Composer {
 }
 
 impl Composer {
-    /// The thread's model, chosen from Claude Code's aliases. Disabled while a
-    /// turn runs, because changing it restarts the session.
+    /// The thread's model and reasoning level, in one menu with a section for
+    /// each, both from Claude Code's catalog. Disabled while a turn runs,
+    /// because a change restarts the session.
     fn render_model_picker(&self, is_busy: bool, cx: &Context<Self>) -> impl IntoElement {
-        let thread = self.app.read(cx).selected_thread();
+        let app_state = self.app.read(cx);
+        let thread = app_state.selected_thread();
         let id = thread.map(|thread| thread.id.clone());
-        let current = thread.and_then(|thread| thread.model.clone());
-        let label = current
-            .as_deref()
-            .map_or("Default model".to_owned(), model_label);
+        let model = thread.and_then(|thread| thread.model.clone());
+        let effort = thread.and_then(|thread| thread.effort.clone());
+        let catalog = app_state.catalog().clone();
+        let label = picker_label(&catalog, model.as_deref(), effort.as_deref());
         let app = self.app.clone();
 
         Button::new("model-picker")
             .ghost()
             .xsmall()
             .label(label)
-            .tooltip("Model")
+            .tooltip("Model and reasoning")
             .disabled(is_busy || id.is_none())
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let choices = std::iter::once(None)
-                    .chain(MODEL_ALIASES.iter().map(|alias| Some((*alias).to_owned())));
-                choices.fold(menu, |menu, choice| {
-                    let label = choice.as_deref().map_or("Default".to_owned(), model_label);
-                    let is_checked = choice == current;
+                let Some(id) = id.clone() else {
+                    return menu;
+                };
+                let models = std::iter::once(None).chain(catalog.models.iter().map(Some));
+                let menu = models.fold(menu.label("Model"), |menu, info| {
+                    let choice = info.map(|info| info.id.clone());
+                    let item =
+                        PopupMenuItem::new(info.map_or("Default", |info| info.name.as_str()))
+                            .checked(choice == model);
                     let (app, id) = (app.clone(), id.clone());
-                    menu.item(PopupMenuItem::new(label).checked(is_checked).on_click(
-                        move |_, _, cx| {
-                            if let Some(id) = &id {
-                                app.update(cx, |app, cx| app.set_model(id, choice.clone(), cx));
-                            }
+                    menu.item(item.on_click(move |_, _, cx| {
+                        app.update(cx, |app, cx| app.set_model(&id, choice.clone(), cx));
+                    }))
+                });
+
+                let menu = menu.separator().label("Reasoning");
+                let levels = catalog.efforts_for(model.as_deref());
+                if levels.is_empty() {
+                    return menu.label("Not available for this model");
+                }
+                let levels = std::iter::once(None).chain(levels.into_iter().map(Some));
+                levels.fold(menu, |menu, level| {
+                    let label = level.as_ref().map_or_else(
+                        || "Default".to_owned(),
+                        |level| match &level.note {
+                            Some(note) => format!("{} ({note})", level.name),
+                            None => level.name.clone(),
                         },
-                    ))
+                    );
+                    let choice = level.map(|level| level.id);
+                    let item = PopupMenuItem::new(label).checked(choice == effort);
+                    let (app, id) = (app.clone(), id.clone());
+                    menu.item(item.on_click(move |_, _, cx| {
+                        app.update(cx, |app, cx| app.set_effort(&id, choice.clone(), cx));
+                    }))
                 })
             })
     }
 }
 
-/// "opus" -> "Opus".
-fn model_label(alias: &str) -> String {
-    let mut chars = alias.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+/// "Opus 5.5 · High", or "Default model" when nothing is chosen.
+fn picker_label(catalog: &ModelCatalog, model: Option<&str>, effort: Option<&str>) -> String {
+    let model_name = model
+        .and_then(|id| catalog.model(id))
+        .map_or("Default model", |info| info.name.as_str());
+    let effort_name = effort.and_then(|id| {
+        catalog
+            .efforts_for(model)
+            .into_iter()
+            .find(|level| level.id == id)
+            .map(|level| level.name)
+    });
+    match effort_name {
+        Some(effort) => format!("{model_name} · {effort}"),
+        None => model_name.to_owned(),
+    }
 }
 
 impl Render for Composer {

@@ -9,10 +9,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use agent_desk_core::claude::catalog::{self, ModelCatalog};
 use agent_desk_core::claude::history::{self, HistoryEntry, HistorySession};
 use agent_desk_core::claude::{
     AgentEvent, ClaudeConfig, ClaudeSession, PermissionSetup, SessionError, SessionEvent,
-    is_known_model, is_valid_session_id,
+    is_plain_token, is_valid_session_id,
 };
 use agent_desk_core::detect::{AgentStatus, detect_claude};
 use agent_desk_core::settings::{Appearance, Settings};
@@ -49,6 +50,8 @@ pub struct AppState {
     claude_override: Option<PathBuf>,
     /// Claude Code's config directory, read for a project's past sessions.
     history_home: Option<PathBuf>,
+    /// The models and reasoning levels Claude Code offers this account.
+    catalog: ModelCatalog,
 }
 
 impl AppState {
@@ -85,8 +88,18 @@ impl AppState {
             store,
             root,
             claude_override,
+            catalog: history_home
+                .as_deref()
+                .and_then(catalog::load_catalog)
+                .unwrap_or_else(ModelCatalog::fallback),
             history_home,
         }
+    }
+
+    /// The models and reasoning levels on offer, from Claude Code's own
+    /// catalog, or its CLI aliases when that is unavailable.
+    pub fn catalog(&self) -> &ModelCatalog {
+        &self.catalog
     }
 
     pub fn projects(&self) -> &[Project] {
@@ -276,16 +289,22 @@ impl AppState {
         cx.notify();
     }
 
-    /// Sets the thread's model; `None` uses Claude's default. Only known
-    /// aliases are kept. A live session ends so the next message restarts
-    /// with the new model and resumes the same conversation.
+    /// Sets the thread's model; `None` uses Claude's default. Only catalog
+    /// models are kept. A reasoning level the new model lacks is cleared, and
+    /// a live session ends so the next message restarts with the new model
+    /// and resumes the same conversation.
     pub fn set_model(&mut self, id: &ThreadId, model: Option<String>, cx: &mut Context<Self>) {
         let Some(ix) = self.thread_ix(id) else {
             return;
         };
-        let model = model.filter(|model| is_known_model(model));
+        let model = model.filter(|model| self.catalog.model(model).is_some());
         if self.threads[ix].model == model {
             return;
+        }
+        if let Some(effort) = &self.threads[ix].effort
+            && !self.effort_is_offered(model.as_deref(), effort)
+        {
+            self.threads[ix].effort = None;
         }
         self.threads[ix].model = model;
         // Dropping the session kills the process; nothing is mid-turn, as the
@@ -293,6 +312,32 @@ impl AppState {
         self.sessions.remove(id);
         self.save_thread(ix);
         cx.notify();
+    }
+
+    /// Sets the thread's reasoning level; `None` uses the model's default.
+    /// Only levels the thread's model offers are kept, and a live session
+    /// ends as for a model change.
+    pub fn set_effort(&mut self, id: &ThreadId, effort: Option<String>, cx: &mut Context<Self>) {
+        let Some(ix) = self.thread_ix(id) else {
+            return;
+        };
+        let model = self.threads[ix].model.clone();
+        let effort = effort.filter(|effort| self.effort_is_offered(model.as_deref(), effort));
+        if self.threads[ix].effort == effort {
+            return;
+        }
+        self.threads[ix].effort = effort;
+        self.sessions.remove(id);
+        self.save_thread(ix);
+        cx.notify();
+    }
+
+    /// Whether `effort` is a level `model` takes.
+    fn effort_is_offered(&self, model: Option<&str>, effort: &str) -> bool {
+        self.catalog
+            .efforts_for(model)
+            .iter()
+            .any(|level| level.id == effort)
     }
 
     pub fn recheck_claude(&mut self, cx: &mut Context<Self>) {
@@ -332,7 +377,11 @@ impl AppState {
             binary: self.claude_binary(),
             cwd: thread.project.clone(),
             resume,
-            model: thread.model.clone().filter(|model| is_known_model(model)),
+            model: thread.model.clone().filter(|model| is_plain_token(model)),
+            effort: thread
+                .effort
+                .clone()
+                .filter(|effort| is_plain_token(effort)),
             permission: PermissionSetup::FullAccess,
         };
         let (session, events) = ClaudeSession::start(&config).map_err(|error| match error {

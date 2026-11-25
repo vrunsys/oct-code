@@ -12,6 +12,7 @@ fn config(cwd: PathBuf, resume: Option<&str>) -> ClaudeConfig {
         cwd,
         resume: resume.map(str::to_owned),
         model: None,
+        effort: None,
         permission: PermissionSetup::FullAccess,
     }
 }

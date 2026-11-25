@@ -24,14 +24,7 @@ const STOP_THREAD_KEY: &str = "ctrl-.";
 
 actions!(
     agent_desk,
-    [
-        AddProject,
-        NewThread,
-        StopThread,
-        UseSystemAppearance,
-        UseLightAppearance,
-        UseDarkAppearance,
-    ]
+    [AddProject, NewThread, StopThread, ToggleAppearance,]
 );
 
 pub fn bind_keys(cx: &mut App) {

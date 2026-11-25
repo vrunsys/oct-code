@@ -19,6 +19,7 @@ use serde_json::Value;
 
 use crate::app_state::AppState;
 use crate::layout::content_column;
+use crate::markdown::assistant_markdown;
 
 /// How many lines of tool output an expanded tool row shows before "Show all".
 pub const PREVIEW_LINES: usize = 200;
@@ -143,8 +144,11 @@ impl ThreadView {
             return div().into_any_element();
         };
         let body = match item {
-            Item::User(text) => self.render_message("You", text, true, cx),
-            Item::Assistant(text) => self.render_message("Claude", text, false, cx),
+            Item::User(text) => self.render_message("You", text.into_any_element(), true, cx),
+            Item::Assistant(text) => {
+                let body = assistant_markdown(self.message_id(ix), text).into_any_element();
+                self.render_message("Claude", body, false, cx)
+            }
             Item::Tool {
                 id,
                 name,
@@ -160,10 +164,17 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// A stable id for the message at `ix`. Threads only grow by appending,
+    /// so a position within a thread never changes meaning.
+    fn message_id(&self, ix: usize) -> SharedString {
+        let thread = self.shown.as_ref().map_or("", |(id, _)| id.0.as_str());
+        format!("message-{thread}-{ix}").into()
+    }
+
     fn render_message(
         &self,
         author: &'static str,
-        text: String,
+        body: AnyElement,
         is_user: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -184,7 +195,7 @@ impl ThreadView {
                     .when(is_user, |this| {
                         this.px_3().py_2().rounded(theme.radius).bg(theme.muted)
                     })
-                    .child(text),
+                    .child(body),
             )
             .into_any_element()
     }

@@ -7,13 +7,14 @@ use std::time::{Duration, Instant};
 use agent_desk::app_state::AppState;
 use agent_desk_core::store::ThreadStore;
 use agent_desk_core::thread::{Item, Thread, ThreadId, ThreadStatus};
-use agent_desk_test_support::fake_claude_path;
+use agent_desk_test_support::{fake_claude_path, write_model_catalog};
 use gpui_kit::{AppContext as _, Entity, TestAppContext};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Fixture {
     root: tempfile::TempDir,
+    claude_home: tempfile::TempDir,
     _work: tempfile::TempDir,
     project: PathBuf,
 }
@@ -24,8 +25,11 @@ impl Fixture {
         let work = tempfile::tempdir().unwrap();
         let project = work.path().join("repo");
         fs::create_dir(&project).unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        write_model_catalog(claude_home.path());
         Self {
             root,
+            claude_home,
             _work: work,
             project,
         }
@@ -34,7 +38,8 @@ impl Fixture {
     fn load(&self, cx: &mut TestAppContext, claude: Option<PathBuf>) -> Entity<AppState> {
         cx.executor().allow_parking();
         let root = self.root.path().to_path_buf();
-        cx.new(|_| AppState::load_with_history(root, claude, None))
+        let home = Some(self.claude_home.path().to_path_buf());
+        cx.new(|_| AppState::load_with_history(root, claude, home))
     }
 
     /// A loaded app with fake-claude, this project and one selected thread.
@@ -254,7 +259,9 @@ fn choosing_a_model_restarts_with_it(cx: &mut TestAppContext) {
     send(cx, &app, &id, "hi");
     wait_for(cx, &app, &id, idle_with_items(2));
 
-    app.update(cx, |app, cx| app.set_model(&id, Some("opus".into()), cx));
+    app.update(cx, |app, cx| {
+        app.set_model(&id, Some("claude-opus-5-5".into()), cx)
+    });
     assert!(
         !app.read_with(cx, |app, _| app.is_live(&id)),
         "the old session ends"
@@ -262,7 +269,7 @@ fn choosing_a_model_restarts_with_it(cx: &mut TestAppContext) {
     send(cx, &app, &id, "args");
     let thread = wait_for(cx, &app, &id, idle_with_items(4));
     assert!(
-        last_assistant(&thread).contains("--model opus"),
+        last_assistant(&thread).contains("--model claude-opus-5-5"),
         "{thread:#?}"
     );
     assert!(
@@ -277,4 +284,69 @@ fn an_unknown_model_is_not_kept(cx: &mut TestAppContext) {
     let (app, id) = fixture.start(cx);
     app.update(cx, |app, cx| app.set_model(&id, Some("--evil".into()), cx));
     assert_eq!(thread(cx, &app, &id).model, None);
+}
+
+#[gpui_kit::test]
+fn choosing_reasoning_effort_restarts_with_it(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (app, id) = fixture.start(cx);
+    send(cx, &app, &id, "hi");
+    wait_for(cx, &app, &id, idle_with_items(2));
+
+    app.update(cx, |app, cx| app.set_effort(&id, Some("xhigh".into()), cx));
+    assert!(
+        !app.read_with(cx, |app, _| app.is_live(&id)),
+        "the old session ends"
+    );
+    send(cx, &app, &id, "args");
+    let thread = wait_for(cx, &app, &id, idle_with_items(4));
+    assert!(
+        last_assistant(&thread).contains("--effort xhigh"),
+        "{thread:#?}"
+    );
+    assert!(
+        last_assistant(&thread).contains("--resume fake-session-1"),
+        "{thread:#?}"
+    );
+}
+
+#[gpui_kit::test]
+fn an_unknown_effort_is_not_kept(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (app, id) = fixture.start(cx);
+    app.update(cx, |app, cx| app.set_effort(&id, Some("--evil".into()), cx));
+    assert_eq!(thread(cx, &app, &id).effort, None);
+}
+
+#[gpui_kit::test]
+fn a_reasoning_level_the_new_model_lacks_is_cleared(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (app, id) = fixture.start(cx);
+    app.update(cx, |app, cx| {
+        app.set_model(&id, Some("claude-opus-5-5".into()), cx);
+        app.set_effort(&id, Some("xhigh".into()), cx);
+    });
+    assert_eq!(thread(cx, &app, &id).effort.as_deref(), Some("xhigh"));
+
+    // The fixture's Haiku 4.5 has no reasoning levels.
+    app.update(cx, |app, cx| {
+        app.set_model(&id, Some("claude-haiku-4-5-20251001".into()), cx)
+    });
+    let thread = thread(cx, &app, &id);
+    assert_eq!(thread.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    assert_eq!(thread.effort, None);
+}
+
+#[gpui_kit::test]
+fn models_come_from_claude_codes_catalog(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let app = fixture.load(cx, None);
+    let names: Vec<String> = app.read_with(cx, |app, _| {
+        app.catalog()
+            .models
+            .iter()
+            .map(|m| m.name.clone())
+            .collect()
+    });
+    assert_eq!(names, ["Opus 5.5", "Sonnet 5.5", "Haiku 4.5"]);
 }
