@@ -350,3 +350,19 @@ fn models_come_from_claude_codes_catalog(cx: &mut TestAppContext) {
     });
     assert_eq!(names, ["Opus 5.5", "Sonnet 5.5", "Haiku 4.5"]);
 }
+
+#[gpui_kit::test]
+fn thinking_is_kept_before_the_reply(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (app, id) = fixture.start(cx);
+    send(cx, &app, &id, "think");
+    let thread = wait_for(cx, &app, &id, idle_with_items(3));
+    assert_eq!(
+        thread.items,
+        [
+            Item::User("think".into()),
+            Item::Thinking("pondering".into()),
+            Item::Assistant("echo: think".into())
+        ]
+    );
+}

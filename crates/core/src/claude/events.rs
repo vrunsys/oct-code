@@ -25,6 +25,16 @@ pub enum AgentEvent {
     AssistantText {
         text: String,
     },
+    /// The next piece of Claude's thinking summary, as with
+    /// [`AgentEvent::AssistantDelta`]; [`AgentEvent::Thinking`] follows.
+    ThinkingDelta {
+        text: String,
+    },
+    /// A finished thinking summary. Blocks whose thinking is omitted have no
+    /// text and yield no event.
+    Thinking {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -87,6 +97,13 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>, ParseError> {
                     Some(required_str(block, "text").map(|text| AgentEvent::AssistantText { text }))
                 }
                 Some("tool_use") => Some(parse_tool_use(block)),
+                Some("thinking") => str_field(block, "thinking")
+                    .filter(|text| !text.is_empty())
+                    .map(|text| {
+                        Ok(AgentEvent::Thinking {
+                            text: text.to_owned(),
+                        })
+                    }),
                 _ => None,
             })
             .collect(),
@@ -95,14 +112,9 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>, ParseError> {
             .filter(|block| str_field(block, "type") == Some("tool_result"))
             .map(parse_tool_result)
             .collect(),
-        // Sent with `--include-partial-messages`. Only text is shown as it
-        // arrives; tool calls and thinking wait for their finished block.
-        "stream_event" => Ok(text_delta(&value)
-            .map(|text| AgentEvent::AssistantDelta {
-                text: text.to_owned(),
-            })
-            .into_iter()
-            .collect()),
+        // Sent with `--include-partial-messages`. Text and thinking are shown
+        // as they arrive; tool calls wait for their finished block.
+        "stream_event" => Ok(stream_delta(&value).into_iter().collect()),
         "result" => Ok(vec![AgentEvent::TurnDone {
             is_error: value
                 .get("is_error")
@@ -121,13 +133,22 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>, ParseError> {
     }
 }
 
-fn text_delta(value: &Value) -> Option<&str> {
+fn stream_delta(value: &Value) -> Option<AgentEvent> {
     let event = value.get("event")?;
+    if str_field(event, "type") != Some("content_block_delta") {
+        return None;
+    }
     let delta = event.get("delta")?;
-    (str_field(event, "type") == Some("content_block_delta")
-        && str_field(delta, "type") == Some("text_delta"))
-    .then(|| str_field(delta, "text"))
-    .flatten()
+    let (text, event): (_, fn(String) -> AgentEvent) = match str_field(delta, "type")? {
+        "text_delta" => (str_field(delta, "text")?, |text| {
+            AgentEvent::AssistantDelta { text }
+        }),
+        "thinking_delta" => (str_field(delta, "thinking")?, |text| {
+            AgentEvent::ThinkingDelta { text }
+        }),
+        _ => return None,
+    };
+    (!text.is_empty()).then(|| event(text.to_owned()))
 }
 
 fn parse_tool_use(block: &Value) -> Result<AgentEvent, ParseError> {

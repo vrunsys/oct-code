@@ -208,3 +208,44 @@ fn unstreamed_text_is_appended_as_before() {
     t.apply(&full_text("b"));
     assert_eq!(t.items.len(), 3);
 }
+
+#[test]
+fn thinking_streams_into_its_own_item_before_the_reply() {
+    let mut t = thread();
+    t.push_user("hi");
+    t.apply(&AgentEvent::ThinkingDelta {
+        text: "Check".into(),
+    });
+    t.apply(&AgentEvent::ThinkingDelta { text: "ing".into() });
+    assert_eq!(t.items.last(), Some(&Item::Thinking("Checking".into())));
+    t.apply(&AgentEvent::Thinking {
+        text: "Checking.".into(),
+    });
+    t.apply(&delta("Yes"));
+    t.apply(&full_text("Yes."));
+    assert_eq!(
+        t.items,
+        [
+            Item::User("hi".into()),
+            Item::Thinking("Checking.".into()),
+            Item::Assistant("Yes.".into())
+        ]
+    );
+}
+
+#[test]
+fn reply_text_never_lands_in_a_thinking_item() {
+    let mut t = thread();
+    t.push_user("hi");
+    t.apply(&AgentEvent::ThinkingDelta { text: "hmm".into() });
+    // The whole thinking block was empty, so no Thinking event came.
+    t.apply(&delta("Yes"));
+    assert_eq!(
+        t.items,
+        [
+            Item::User("hi".into()),
+            Item::Thinking("hmm".into()),
+            Item::Assistant("Yes".into())
+        ]
+    );
+}

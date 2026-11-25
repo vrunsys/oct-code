@@ -43,6 +43,8 @@ pub enum ToolOutcome {
 pub enum Item {
     User(String),
     Assistant(String),
+    /// A summary of Claude's thinking, shown before what it led to.
+    Thinking(String),
     Tool {
         id: String,
         name: String,
@@ -69,7 +71,7 @@ pub struct Thread {
     /// The reasoning effort chosen for this thread; `None` uses the model's default.
     #[serde(default)]
     pub effort: Option<String>,
-    /// Whether the last item is assistant text Claude is still writing.
+    /// Whether the last item is text or thinking Claude is still writing.
     #[serde(skip)]
     streaming: bool,
 }
@@ -108,21 +110,10 @@ impl Thread {
     pub fn apply(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::Init { session_id, .. } => self.session_id = Some(session_id.clone()),
-            AgentEvent::AssistantDelta { text } => {
-                match self.items.last_mut() {
-                    Some(Item::Assistant(open)) if self.streaming => open.push_str(text),
-                    _ => self.items.push(Item::Assistant(text.clone())),
-                }
-                self.streaming = true;
-            }
-            // The finished block is the truth; it replaces what streamed in.
-            AgentEvent::AssistantText { text } => {
-                match self.items.last_mut() {
-                    Some(Item::Assistant(open)) if self.streaming => text.clone_into(open),
-                    _ => self.items.push(Item::Assistant(text.clone())),
-                }
-                self.streaming = false;
-            }
+            AgentEvent::AssistantDelta { text } => self.stream(text, Item::Assistant),
+            AgentEvent::ThinkingDelta { text } => self.stream(text, Item::Thinking),
+            AgentEvent::AssistantText { text } => self.finish(text, Item::Assistant),
+            AgentEvent::Thinking { text } => self.finish(text, Item::Thinking),
             AgentEvent::ToolUse { id, name, input } => self.push_finished(Item::Tool {
                 id: id.clone(),
                 name: name.clone(),
@@ -161,6 +152,36 @@ impl Thread {
                 };
             }
             AgentEvent::Unknown { .. } => {}
+        }
+    }
+
+    /// Adds a piece to the open block of the same kind, or opens one.
+    fn stream(&mut self, text: &str, kind: fn(String) -> Item) {
+        match self.open_block(kind) {
+            Some(open) => open.push_str(text),
+            None => self.items.push(kind(text.to_owned())),
+        }
+        self.streaming = true;
+    }
+
+    /// The finished block is the truth; it replaces what streamed in.
+    fn finish(&mut self, text: &str, kind: fn(String) -> Item) {
+        match self.open_block(kind) {
+            Some(open) => text.clone_into(open),
+            None => self.items.push(kind(text.to_owned())),
+        }
+        self.streaming = false;
+    }
+
+    /// The text of the last item, if it is a `kind` block still streaming.
+    fn open_block(&mut self, kind: fn(String) -> Item) -> Option<&mut String> {
+        if !self.streaming {
+            return None;
+        }
+        match (self.items.last_mut()?, kind(String::new())) {
+            (Item::Assistant(open), Item::Assistant(_))
+            | (Item::Thinking(open), Item::Thinking(_)) => Some(open),
+            _ => None,
         }
     }
 

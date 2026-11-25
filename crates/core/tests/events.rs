@@ -4,6 +4,8 @@ const BASIC: &str = include_str!("fixtures/claude_basic.jsonl");
 const TOOL: &str = include_str!("fixtures/claude_tool.jsonl");
 /// Captured with `--include-partial-messages`.
 const PARTIAL: &str = include_str!("fixtures/claude_partial.jsonl");
+/// Captured with `--thinking-display summarized`.
+const THINKING: &str = include_str!("fixtures/claude_thinking.jsonl");
 
 fn parse_all(fixture: &str) -> Vec<AgentEvent> {
     fixture
@@ -128,8 +130,39 @@ fn stream_events_other_than_text_yield_nothing() {
     for line in [
         r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
         r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{"}}}"#,
-        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"x"}}}"#,
     ] {
         assert_eq!(parse_line(line), Ok(Vec::new()), "{line}");
     }
+}
+
+#[test]
+fn thinking_streams_then_arrives_whole_before_the_reply() {
+    let events = parse_all(THINKING);
+    let streamed: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ThinkingDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let thinking_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Thinking { text } if *text == streamed))
+        .expect("the whole thinking block, matching what streamed");
+    let reply_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::AssistantText { .. }))
+        .expect("a reply");
+    assert!(!streamed.trim().is_empty());
+    assert!(thinking_at < reply_at);
+}
+
+#[test]
+fn omitted_thinking_yields_nothing() {
+    // Without a display mode, Claude sends thinking blocks with no text.
+    let block = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"","signature":"x"}]}}"#;
+    let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}}"#;
+    assert_eq!(parse_line(block), Ok(Vec::new()));
+    assert_eq!(parse_line(delta), Ok(Vec::new()));
 }

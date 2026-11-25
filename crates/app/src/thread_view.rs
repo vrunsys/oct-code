@@ -1,6 +1,8 @@
 //! The conversation pane: a virtualized list of a thread's items.
 //!
 //! Messages render as quiet typographic blocks rather than chat bubbles.
+//! Claude's thinking shows in muted text above what it led to, open by
+//! default as in Claude Code, and folds away with one click.
 //! Tool calls are collapsed disclosure rows; expanded output shows a preview
 //! of [`PREVIEW_LINES`] lines with a toggle for the rest, so a 10k-line tool
 //! result never lays out in full unless the user asks for it.
@@ -74,6 +76,8 @@ pub struct ThreadView {
     /// Tool-use ids whose output is expanded, and those showing every line.
     expanded: HashSet<String>,
     full_output: HashSet<String>,
+    /// Indexes of thinking items the user folded away.
+    folded_thinking: HashSet<usize>,
     _app_subscription: Subscription,
 }
 
@@ -89,6 +93,7 @@ impl ThreadView {
             rewrites: 0,
             expanded: HashSet::new(),
             full_output: HashSet::new(),
+            folded_thinking: HashSet::new(),
             _app_subscription: subscription,
         };
         this.sync(cx);
@@ -119,6 +124,7 @@ impl ThreadView {
                 self.list.reset(next.as_ref().map_or(0, |(_, len)| *len));
                 self.expanded.clear();
                 self.full_output.clear();
+                self.folded_thinking.clear();
             }
         }
         self.shown = next;
@@ -128,6 +134,14 @@ impl ThreadView {
     fn toggle_expanded(&mut self, ix: usize, tool_id: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(tool_id) {
             self.expanded.insert(tool_id.to_owned());
+        }
+        self.list.remeasure_items(ix..ix + 1);
+        cx.notify();
+    }
+
+    fn toggle_thinking(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if !self.folded_thinking.remove(&ix) {
+            self.folded_thinking.insert(ix);
         }
         self.list.remeasure_items(ix..ix + 1);
         cx.notify();
@@ -157,6 +171,7 @@ impl ThreadView {
                 let body = assistant_markdown(self.message_id(ix), text).into_any_element();
                 self.render_message("Claude", body, false, cx)
             }
+            Item::Thinking(text) => self.render_thinking(ix, text, cx),
             Item::Tool {
                 id,
                 name,
@@ -205,6 +220,40 @@ impl ThreadView {
                     })
                     .child(body),
             )
+            .into_any_element()
+    }
+
+    fn render_thinking(&self, ix: usize, text: String, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let is_open = !self.folded_thinking.contains(&ix);
+        v_flex()
+            .gap_1()
+            .child(
+                // In a row, so the button keeps its natural width.
+                h_flex().child(
+                    Button::new(SharedString::from(format!("thinking-{ix}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(if is_open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .label("Thinking")
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_thinking(ix, cx))),
+                ),
+            )
+            .when(is_open, |this| {
+                this.child(
+                    div()
+                        .pl_3()
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(assistant_markdown(self.message_id(ix), text)),
+                )
+            })
             .into_any_element()
     }
 

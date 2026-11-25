@@ -50,6 +50,11 @@ pub fn build_args(cfg: &ClaudeConfig) -> Vec<String> {
         "--verbose",
         // Text as Claude writes it, not only once a block is finished.
         "--include-partial-messages",
+        // Claude's thinking as readable summaries; without this its thinking
+        // blocks arrive empty. Hidden from `--help`, but it is how the Agent
+        // SDK asks for the same thing.
+        "--thinking-display",
+        "summarized",
     ]
     .map(str::to_owned)
     .into();

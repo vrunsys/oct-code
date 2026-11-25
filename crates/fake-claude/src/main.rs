@@ -48,6 +48,17 @@ fn main() -> ExitCode {
             "args" => args.join(" "),
             _ => format!("echo: {text}"),
         };
+        if text == "think" {
+            emit(
+                &mut out,
+                &json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                        "delta": {"type": "thinking_delta", "thinking": "pondering"}}}),
+            );
+            emit(
+                &mut out,
+                &json!({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "pondering", "signature": "x"}]}}),
+            );
+        }
         if streams {
             // Like Claude Code: the text in pieces, then the whole block.
             let mid = reply
