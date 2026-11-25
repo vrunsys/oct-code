@@ -60,6 +60,9 @@ pub struct Thread {
     pub items: Vec<Item>,
     pub status: ThreadStatus,
     pub cost_usd: f64,
+    /// Creation time in Unix milliseconds; 0 for threads saved before this field existed.
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 impl Thread {
@@ -72,6 +75,7 @@ impl Thread {
             items: Vec::new(),
             status: ThreadStatus::Idle,
             cost_usd: 0.0,
+            created_at: unix_millis_now(),
         }
     }
 
@@ -148,4 +152,12 @@ impl Thread {
             format!("Agent exited ({how}): {tail}")
         });
     }
+}
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }

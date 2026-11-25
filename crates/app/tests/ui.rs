@@ -1,0 +1,114 @@
+//! UI integration tests: the real WorkspaceView in a headless window, driven
+//! by native clicks and key presses.
+
+use std::fs;
+use std::path::Path;
+
+use agent_desk::app_state::AppState;
+use agent_desk::appearance::Appearance;
+use agent_desk::workspace_view::{WorkspaceView, new_thread_button_id};
+use agent_desk_core::store::ProjectList;
+use agent_desk_core::thread::Item;
+use gpui_kit::test::TestWindowExt;
+use gpui_kit::{
+    AnyWindowHandle, AppContext as _, Bounds, Entity, TestAppContext, WindowBounds, WindowOptions,
+    px, size,
+};
+
+fn open_workspace(root: &Path, cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<AppState>) {
+    cx.update(gpui_kit::init);
+    cx.update(agent_desk::actions::bind_keys);
+    let root = root.to_path_buf();
+    let missing_claude = root.join("no-claude-here");
+    let app = cx.new(|_| AppState::load(root, Some(missing_claude)));
+    let window_app = app.clone();
+    let (handle, _) = cx.update(|cx| {
+        gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    Default::default(),
+                    size(px(1000.), px(700.)),
+                ))),
+                ..Default::default()
+            },
+            cx,
+            move |window, cx| {
+                cx.new(|cx| WorkspaceView::new(window_app, Appearance::System, window, cx))
+            },
+        )
+        .expect("open test window")
+    });
+    (handle, app)
+}
+
+#[gpui_kit::test]
+fn empty_workspace_offers_add_project(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    let (handle, _) = open_workspace(root.path(), cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("add-project-empty").visible());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn new_thread_then_enter_sends_the_message(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let project = work.path().join("repo");
+    fs::create_dir(&project).unwrap();
+    let project = ProjectList::load(root.path().into())
+        .add(&project)
+        .unwrap()
+        .path;
+
+    let (handle, app) = open_workspace(root.path(), cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(new_thread_button_id(&project), cx);
+
+        // An empty draft cannot be sent.
+        assert_eq!(window.find("send").disabled(), Some(true));
+
+        // The new thread's composer has focus, so typing goes straight into it.
+        window.input("fix the login bug", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    app.read_with(cx, |app, _| {
+        let thread = app.selected_thread().expect("the new thread is selected");
+        assert_eq!(thread.items, [Item::User("fix the login bug".into())]);
+        assert_eq!(thread.title, "fix the login bug");
+    });
+}
+
+#[gpui_kit::test]
+fn new_thread_shortcut_creates_a_thread(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    fs::create_dir(work.path().join("repo")).unwrap();
+    ProjectList::load(root.path().into())
+        .add(&work.path().join("repo"))
+        .unwrap();
+
+    let (handle, app) = open_workspace(root.path(), cx);
+    let shortcut = if cfg!(target_os = "macos") {
+        "cmd-n"
+    } else {
+        "ctrl-n"
+    };
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press(shortcut, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    app.read_with(cx, |app, _| {
+        assert_eq!(app.threads().len(), 1);
+        assert!(app.selected_thread().is_some());
+    });
+}

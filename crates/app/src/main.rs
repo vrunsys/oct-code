@@ -1,54 +1,46 @@
-use gpui_kit::component::{
-    ActiveTheme as _, IconName,
-    button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
-};
-use gpui_kit::*;
+//! Agent Desk: a desktop app for running coding agents per project thread.
 
-struct Counter {
-    count: usize,
-}
+use std::path::PathBuf;
 
-impl Render for Counter {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(div().text_3xl().child(self.count.to_string()))
-            .child(
-                h_flex().gap_2().child(
-                    Button::new("increment")
-                        .primary()
-                        .icon(IconName::Plus)
-                        .label("Increment")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.count += 1;
-                            cx.notify();
-                        })),
-                ),
-            )
-    }
-}
+use agent_desk::actions;
+use agent_desk::app_state::AppState;
+use agent_desk::appearance::Appearance;
+use agent_desk::workspace_view::WorkspaceView;
+use agent_desk_core::store::default_root;
+use gpui_kit::{AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+
+/// Points Agent Desk at a specific `claude` binary instead of searching `PATH`.
+const CLAUDE_BIN_ENV: &str = "AGENT_DESK_CLAUDE_BIN";
 
 fn main() {
+    let claude_override = std::env::var_os(CLAUDE_BIN_ENV).map(PathBuf::from);
+    let root = default_root();
+    let appearance = Appearance::from_env();
+
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
+        .run(move |cx| {
             gpui_kit::init(cx);
+            actions::bind_keys(cx);
 
+            // Window geometry is a platform boundary, so pixels are correct here.
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(360.), px(240.)),
+                    size(px(1100.), px(720.)),
                     cx,
                 ))),
+                window_min_size: Some(size(px(720.), px(480.))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Agent Desk".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
-            gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Counter { count: 0 }))
-                .expect("failed to open window");
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                let app = cx.new(|_| AppState::load(root, claude_override));
+                cx.new(|cx| WorkspaceView::new(app, appearance, window, cx))
+            })
+            .expect("failed to open the Agent Desk window");
         });
 }

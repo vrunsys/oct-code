@@ -135,3 +135,20 @@ fn exit_while_idle_stays_idle() {
     t.on_exit(Some(0), "");
     assert_eq!(t.status, ThreadStatus::Idle);
 }
+
+#[test]
+fn new_thread_records_creation_time() {
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(thread().created_at >= before);
+}
+
+#[test]
+fn thread_saved_before_created_at_still_loads() {
+    let mut value = serde_json::to_value(thread()).unwrap();
+    value.as_object_mut().unwrap().remove("created_at");
+    let loaded: Thread = serde_json::from_value(value).unwrap();
+    assert_eq!(loaded.created_at, 0);
+}
