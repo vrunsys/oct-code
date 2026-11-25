@@ -1,17 +1,20 @@
-//! The message box under a thread: the text, the thread's model, and Send.
+//! The message box under a thread: the text, then the model picker and Send
+//! on the trailing edge.
 //! Enter sends; Shift+Enter adds a line.
 
 use agent_desk_core::claude::catalog::ModelCatalog;
-use agent_desk_core::thread::ThreadStatus;
+use agent_desk_core::thread::{ThreadId, ThreadStatus};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, h_flex,
+    v_flex,
 };
 use gpui_kit::{
-    Anchor, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    Subscription, Window,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
+    rems,
 };
 
 use crate::app_state::AppState;
@@ -86,65 +89,180 @@ impl Composer {
     }
 }
 
+/// Width of the model column; the reasoning column is wider for its notes.
+const MODEL_COLUMN_REM: f32 = 11.;
+const REASONING_COLUMN_REM: f32 = 14.;
+
 impl Composer {
-    /// The thread's model and reasoning level, in one menu with a section for
-    /// each, both from Claude Code's catalog. Disabled while a turn runs,
-    /// because a change restarts the session.
-    fn render_model_picker(&self, is_busy: bool, cx: &Context<Self>) -> impl IntoElement {
+    /// The thread's model and reasoning level, side by side in one popover,
+    /// both from Claude Code's catalog. It stays open while you choose, so a
+    /// model and its level can be picked in one go. Disabled while a turn
+    /// runs, because a change restarts the session.
+    fn render_model_picker(&self, is_busy: bool, cx: &Context<Self>) -> AnyElement {
         let app_state = self.app.read(cx);
         let thread = app_state.selected_thread();
-        let id = thread.map(|thread| thread.id.clone());
-        let model = thread.and_then(|thread| thread.model.clone());
-        let effort = thread.and_then(|thread| thread.effort.clone());
-        let catalog = app_state.catalog().clone();
-        let label = picker_label(&catalog, model.as_deref(), effort.as_deref());
-        let app = self.app.clone();
-
-        Button::new("model-picker")
+        let label = picker_label(
+            app_state.catalog(),
+            thread.and_then(|thread| thread.model.as_deref()),
+            thread.and_then(|thread| thread.effort.as_deref()),
+        );
+        let trigger = Button::new("model-picker")
             .ghost()
             .xsmall()
             .label(label)
-            .tooltip("Model and reasoning")
-            .disabled(is_busy || id.is_none())
-            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let Some(id) = id.clone() else {
-                    return menu;
-                };
-                let models = std::iter::once(None).chain(catalog.models.iter().map(Some));
-                let menu = models.fold(menu.label("Model"), |menu, info| {
-                    let choice = info.map(|info| info.id.clone());
-                    let item =
-                        PopupMenuItem::new(info.map_or("Default", |info| info.name.as_str()))
-                            .checked(choice == model);
-                    let (app, id) = (app.clone(), id.clone());
-                    menu.item(item.on_click(move |_, _, cx| {
-                        app.update(cx, |app, cx| app.set_model(&id, choice.clone(), cx));
-                    }))
-                });
+            .tooltip("Model and reasoning");
+        let Some(id) = thread.map(|thread| thread.id.clone()).filter(|_| !is_busy) else {
+            return trigger.disabled(true).into_any_element();
+        };
 
-                let menu = menu.separator().label("Reasoning");
-                let levels = catalog.efforts_for(model.as_deref());
-                if levels.is_empty() {
-                    return menu.label("Not available for this model");
-                }
-                let levels = std::iter::once(None).chain(levels.into_iter().map(Some));
-                levels.fold(menu, |menu, level| {
-                    let label = level.as_ref().map_or_else(
-                        || "Default".to_owned(),
-                        |level| match &level.note {
-                            Some(note) => format!("{} ({note})", level.name),
-                            None => level.name.clone(),
-                        },
-                    );
-                    let choice = level.map(|level| level.id);
-                    let item = PopupMenuItem::new(label).checked(choice == effort);
-                    let (app, id) = (app.clone(), id.clone());
-                    menu.item(item.on_click(move |_, _, cx| {
-                        app.update(cx, |app, cx| app.set_effort(&id, choice.clone(), cx));
-                    }))
-                })
-            })
+        let app = self.app.clone();
+        Popover::new("model-picker-popover")
+            .anchor(Anchor::BottomRight)
+            .trigger(trigger)
+            .content(move |_, _, cx| render_picker_columns(&app, &id, cx))
+            .into_any_element()
     }
+}
+
+/// The Model and Reasoning columns, read fresh from the app on every render
+/// so a choice shows its check at once.
+fn render_picker_columns(app: &Entity<AppState>, id: &ThreadId, cx: &mut App) -> AnyElement {
+    let state = app.read(cx);
+    let Some(thread) = state.threads().iter().find(|thread| &thread.id == id) else {
+        return div().into_any_element();
+    };
+    let model = thread.model.clone();
+    let effort = thread.effort.clone();
+    let catalog = state.catalog().clone();
+    let border = cx.theme().border;
+
+    let model_rows = std::iter::once(None)
+        .chain(catalog.models.iter().map(Some))
+        .map(|info| {
+            let choice = info.map(|info| info.id.clone());
+            let name = info.map_or("Default", |info| info.name.as_str());
+            let (app, id) = (app.clone(), id.clone());
+            picker_row(
+                row_id("model", choice.as_deref()),
+                name,
+                None,
+                choice == model,
+                cx,
+            )
+            .on_click(move |_, _, cx| {
+                app.update(cx, |app, cx| app.set_model(&id, choice.clone(), cx))
+            })
+        });
+
+    let levels = catalog.efforts_for(model.as_deref());
+    let reasoning: Vec<AnyElement> = if levels.is_empty() {
+        vec![muted_note("Not available for this model", cx)]
+    } else {
+        std::iter::once(None)
+            .chain(levels.into_iter().map(Some))
+            .map(|level| {
+                let choice = level.as_ref().map(|level| level.id.clone());
+                let name = level
+                    .as_ref()
+                    .map_or("Default".to_owned(), |level| level.name.clone());
+                let note = level.and_then(|level| level.note);
+                let (app, id) = (app.clone(), id.clone());
+                picker_row(
+                    row_id("effort", choice.as_deref()),
+                    &name,
+                    note,
+                    choice == effort,
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    app.update(cx, |app, cx| app.set_effort(&id, choice.clone(), cx))
+                })
+                .into_any_element()
+            })
+            .collect()
+    };
+
+    // Stretch both columns so the divider runs the popover's full height.
+    h_flex()
+        .items_stretch()
+        .child(
+            v_flex()
+                .w(rems(MODEL_COLUMN_REM))
+                .pr_1()
+                .child(column_title("Model", cx))
+                .children(model_rows),
+        )
+        .child(
+            v_flex()
+                .w(rems(REASONING_COLUMN_REM))
+                .pl_1()
+                .border_l_1()
+                .border_color(border)
+                .child(column_title("Reasoning", cx))
+                .children(reasoning),
+        )
+        .into_any_element()
+}
+
+/// One choice: a fixed check slot keeps every label on the same edge, and an
+/// optional note (such as "Recommended") sits on the trailing edge.
+fn picker_row(
+    id: SharedString,
+    name: &str,
+    note: Option<String>,
+    is_checked: bool,
+    cx: &App,
+) -> Button {
+    let theme = cx.theme();
+    Button::new(id)
+        .ghost()
+        .small()
+        .w_full()
+        .selected(is_checked)
+        .accessibility_label(name.to_owned())
+        .child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .child(div().size_4().flex_none().when(is_checked, |this| {
+                    this.child(Icon::new(IconName::Check).xsmall())
+                }))
+                .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+                .when_some(note, |this, note| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(note),
+                    )
+                }),
+        )
+}
+
+fn column_title(title: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .px_2()
+        .pb_1()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(title)
+}
+
+fn muted_note(text: &'static str, cx: &App) -> AnyElement {
+    div()
+        .px_2()
+        .py_1()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+        .into_any_element()
+}
+
+/// A stable element id for a catalog choice in a column, e.g.
+/// `model:claude-opus-5-5`, or `model:default` for no choice.
+fn row_id(column: &str, choice: Option<&str>) -> SharedString {
+    format!("{column}:{}", choice.unwrap_or("default")).into()
 }
 
 /// "Opus 5.5 · High", or "Default model" when nothing is chosen.
@@ -186,7 +304,7 @@ impl Render for Composer {
                 )
                 .child(
                     h_flex()
-                        .justify_between()
+                        .justify_end()
                         .gap_2()
                         .child(self.render_model_picker(is_busy, cx))
                         .child(

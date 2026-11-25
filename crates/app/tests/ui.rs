@@ -197,7 +197,7 @@ fn stop_shortcut_ends_the_live_session(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn model_menu_sets_the_threads_model(cx: &mut TestAppContext) {
+fn model_picker_shows_models_and_reasoning_side_by_side(cx: &mut TestAppContext) {
     use gpui_kit::MouseButton;
     use gpui_kit::test::{TestEventExt, TestQueryExt};
 
@@ -211,30 +211,55 @@ fn model_menu_sets_the_threads_model(cx: &mut TestAppContext) {
     let (handle, app) = open_workspace(root.path(), cx);
     let id = app.update(cx, |app, cx| app.new_thread(&project, cx));
 
+    let click = |window: &mut gpui_kit::Window, label: &str, cx: &mut gpui_kit::App| {
+        let at = window.find_by_label(label).bounds().center();
+        window.pointer_down(at, MouseButton::Left, cx);
+        window.pointer_up(at, MouseButton::Left, cx);
+    };
+
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
-        // The icon-only Send button still has a name for assistive technology.
-        assert!(window.try_find_by_label("Send").is_some());
+        // The picker sits on the right of the composer, beside Send.
+        let picker = window.find("model-picker").bounds();
+        let send = window.find_by_label("Send").bounds();
+        assert!(picker.right() <= send.left(), "picker is left of Send");
+        assert!(
+            send.left() - picker.right() < gpui_kit::px(24.),
+            "picker is next to Send"
+        );
         window.click("model-picker", cx);
     })
     .unwrap();
     cx.run_until_parked();
+
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
-        let opus = window.find_by_label("Opus 5.5").bounds().center();
-        window.pointer_down(opus, MouseButton::Left, cx);
-        window.pointer_up(opus, MouseButton::Left, cx);
+        let model = window.find_by_label("Opus 5.5").bounds();
+        let level = window.find_by_label("High").bounds();
+        assert!(
+            level.left() >= model.right(),
+            "reasoning is to the right of models"
+        );
+        assert!(
+            level.top() < model.bottom() + gpui_kit::px(200.),
+            "the columns share rows"
+        );
+        click(window, "Opus 5.5", cx);
     })
     .unwrap();
     cx.run_until_parked();
 
-    let model = app.read_with(cx, |app, _| {
-        app.threads()
-            .iter()
-            .find(|t| t.id == id)
-            .unwrap()
-            .model
-            .clone()
+    // Still open: choose the reasoning level without reopening.
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        click(window, "High", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let thread = app.read_with(cx, |app, _| {
+        app.threads().iter().find(|t| t.id == id).unwrap().clone()
     });
-    assert_eq!(model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(thread.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(thread.effort.as_deref(), Some("high"));
 }
