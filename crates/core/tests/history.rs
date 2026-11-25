@@ -232,10 +232,18 @@ fn a_watcher_reports_everything_first_then_only_new_lines() {
     assert!(first[0].from_start);
     assert_eq!(first[0].entries, [HistoryEntry::User("one".into())]);
 
-    append(&history, &format!("{}\n", history.user("two")));
+    append(&history, &format!("{}\n", reply_two(&history)));
     let next = watcher.poll();
     assert!(!next[0].from_start);
-    assert_eq!(next[0].entries, [HistoryEntry::User("two".into())]);
+    assert_eq!(next[0].entries, [text_two()]);
+}
+
+fn reply_two(history: &History) -> Value {
+    history.assistant(json!([{"type": "text", "text": "two"}]))
+}
+
+fn text_two() -> HistoryEntry {
+    HistoryEntry::Agent(AgentEvent::AssistantText { text: "two".into() })
 }
 
 #[test]
@@ -245,7 +253,7 @@ fn a_line_still_being_written_waits_for_its_end() {
     let mut watcher = HistoryWatcher::new(history.home.path(), &history.project);
     watcher.poll();
 
-    let line = format!("{}\n", history.user("two"));
+    let line = format!("{}\n", reply_two(&history));
     let (head, tail) = line.split_at(line.len() / 2);
     append(&history, head);
     assert!(
@@ -256,10 +264,7 @@ fn a_line_still_being_written_waits_for_its_end() {
         "half a line is not an entry"
     );
     append(&history, tail);
-    assert_eq!(
-        watcher.poll()[0].entries,
-        [HistoryEntry::User("two".into())]
-    );
+    assert_eq!(watcher.poll()[0].entries, [text_two()]);
 }
 
 #[test]
@@ -285,4 +290,74 @@ fn a_watcher_reports_a_session_created_after_it_started() {
     assert!(watcher.poll().is_empty());
     history.write(&format!("{ID}.jsonl"), &[history.user("hello")]);
     assert_eq!(watcher.poll().len(), 1);
+}
+
+#[test]
+fn turns_from_history_end_with_their_time_and_tokens() {
+    let history = History::new();
+    let mut ask = history.user("one");
+    ask["timestamp"] = json!("2026-11-25T06:35:14.000Z");
+    let mut reply = history.assistant(json!([{"type": "text", "text": "two"}]));
+    reply["timestamp"] = json!("2026-11-25T06:35:26.500Z");
+    reply["message"]["id"] = json!("msg_1");
+    reply["message"]["usage"] = json!({"input_tokens": 2, "cache_read_input_tokens": 98,
+        "cache_creation_input_tokens": 0, "output_tokens": 30});
+    let mut next = history.user("three");
+    next["timestamp"] = json!("2026-11-25T06:40:00.000Z");
+    history.write(&format!("{ID}.jsonl"), &[ask, reply, next]);
+
+    let entries = &history.sessions()[0].entries;
+    let done = entries
+        .iter()
+        .position(|e| matches!(e, HistoryEntry::Agent(AgentEvent::TurnDone { .. })))
+        .expect("the first turn closes when the next message starts");
+    assert!(matches!(
+        &entries[done],
+        HistoryEntry::Agent(AgentEvent::TurnDone {
+            duration_ms: 12_500,
+            cost_usd: None,
+            ..
+        })
+    ));
+    assert_eq!(entries[done + 1], HistoryEntry::User("three".into()));
+    assert!(
+        entries[..done].contains(&HistoryEntry::Agent(AgentEvent::Usage {
+            message_id: Some("msg_1".into()),
+            input_tokens: 100,
+            output_tokens: 30,
+        }))
+    );
+}
+
+#[test]
+fn parses_claude_codes_timestamps() {
+    use agent_desk_core::claude::history::parse_timestamp_ms;
+    assert_eq!(parse_timestamp_ms("1970-01-01T00:00:00.000Z"), Some(0));
+    assert_eq!(
+        parse_timestamp_ms("2026-11-25T06:35:14.383Z"),
+        Some(1_795_588_514_383)
+    );
+    assert_eq!(
+        parse_timestamp_ms("2024-02-29T12:00:00Z"),
+        Some(1_709_208_000_000)
+    );
+    assert_eq!(parse_timestamp_ms("2026-13-01T00:00:00Z"), None);
+    assert_eq!(parse_timestamp_ms("yesterday"), None);
+}
+
+#[test]
+fn a_session_can_be_read_again_from_the_start() {
+    let history = History::new();
+    history.write(&format!("{ID}.jsonl"), &[history.user("one")]);
+    let mut watcher = HistoryWatcher::new(history.home.path(), &history.project);
+    watcher.poll();
+    append(&history, &format!("{}\n", reply_two(&history)));
+
+    watcher.reread(ID);
+    let again = watcher.poll();
+    assert!(again[0].from_start);
+    assert_eq!(
+        again[0].entries,
+        [HistoryEntry::User("one".into()), text_two()]
+    );
 }

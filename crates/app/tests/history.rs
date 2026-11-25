@@ -268,9 +268,14 @@ fn a_thread_running_here_is_not_overwritten_from_history(cx: &mut TestAppContext
     // fake-claude names its session `fake-session-1`; its process lives on.
     fixture.append_turn("fake-session-1", "written by Claude", "meanwhile");
     after_next_poll(cx);
+    let items = items_of(cx, &app, "fake-session-1");
     assert_eq!(
-        items_of(cx, &app, "fake-session-1"),
+        items[..2],
         [Item::User("hi".into()), Item::Assistant("echo: hi".into())]
+    );
+    assert!(
+        items[2..].iter().all(|item| matches!(item, Item::Stats(_))),
+        "only this turn's stats follow: {items:#?}"
     );
 }
 
@@ -314,4 +319,42 @@ fn approvals_survive_a_refresh_from_history(cx: &mut TestAppContext) {
         "{items:#?}"
     );
     assert_eq!(items.last(), Some(&Item::Assistant("Three files.".into())));
+}
+
+#[gpui_kit::test]
+fn turns_added_elsewhere_while_live_appear_once_the_session_ends(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let app = fixture.load(cx, Some(fake_claude_path()));
+    let project = fixture.project.clone();
+    let id = app.update(cx, |app, cx| {
+        app.add_project(&project, cx);
+        app.watch_history(cx);
+        app.new_thread(&project, cx)
+    });
+    app.update(cx, |app, cx| app.send_message(&id, "hi".into(), cx));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.read_with(cx, |app, _| {
+        app.threads().iter().find(|t| t.id == id).unwrap().status != ThreadStatus::Idle
+    }) {
+        assert!(Instant::now() < deadline, "timed out");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The process stays alive between turns, so this waits.
+    fixture.append_turn("fake-session-1", "from the terminal", "seen");
+    after_next_poll(cx);
+    let user = Item::User("from the terminal".into());
+    assert!(!items_of(cx, &app, "fake-session-1").contains(&user));
+
+    app.update(cx, |app, cx| app.stop(&id, cx));
+    after_next_poll(cx);
+    after_next_poll(cx);
+    let items = items_of(cx, &app, "fake-session-1");
+    assert!(items.contains(&user), "{items:#?}");
+    assert!(
+        items.contains(&Item::Assistant("seen".into())),
+        "{items:#?}"
+    );
 }

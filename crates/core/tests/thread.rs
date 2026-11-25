@@ -249,3 +249,75 @@ fn reply_text_never_lands_in_a_thinking_item() {
         ]
     );
 }
+
+fn usage(id: Option<&str>, input: u64, output: u64) -> AgentEvent {
+    AgentEvent::Usage {
+        message_id: id.map(str::to_owned),
+        input_tokens: input,
+        output_tokens: output,
+    }
+}
+
+#[test]
+fn a_finished_turn_records_its_time_tokens_and_cost() {
+    use agent_desk_core::thread::{TokenCount, TurnStats};
+
+    let mut t = thread();
+    t.push_user("hi");
+    // One model call, reported at its start, on each block, and at its end.
+    t.apply(&usage(Some("m1"), 100, 1));
+    t.apply(&usage(Some("m1"), 100, 1));
+    t.apply(&usage(None, 100, 40));
+    assert_eq!(
+        t.turn_tokens(),
+        TokenCount {
+            input: 100,
+            output: 40
+        }
+    );
+    // A second call in the same turn adds to the first.
+    t.apply(&usage(Some("m2"), 150, 10));
+    t.apply(&turn_done(false, "ok", Some(0.25)));
+    assert_eq!(
+        t.items.last(),
+        Some(&Item::Stats(TurnStats {
+            duration_ms: 1,
+            tokens: TokenCount {
+                input: 250,
+                output: 50
+            },
+            cost_usd: Some(0.25),
+        }))
+    );
+    assert_eq!(
+        t.turn_tokens(),
+        TokenCount::default(),
+        "the next turn starts at zero"
+    );
+}
+
+#[test]
+fn a_turn_is_timed_from_the_message_until_it_ends() {
+    let mut t = thread();
+    assert_eq!(t.turn_elapsed(), None);
+    t.push_user("hi");
+    assert!(t.turn_elapsed().is_some());
+    t.apply(&turn_done(false, "ok", None));
+    assert_eq!(t.turn_elapsed(), None);
+
+    t.push_user("again");
+    t.on_exit(Some(1), "");
+    assert_eq!(t.turn_elapsed(), None, "an ended process ends the turn");
+}
+
+#[test]
+fn a_new_turn_counts_tokens_from_zero() {
+    use agent_desk_core::thread::TokenCount;
+
+    let mut t = thread();
+    t.push_user("hi");
+    t.apply(&usage(Some("m1"), 100, 5));
+    t.on_exit(None, "");
+    t.push_user("again");
+    assert_eq!(t.turn_tokens(), TokenCount::default());
+}

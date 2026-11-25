@@ -166,3 +166,29 @@ fn omitted_thinking_yields_nothing() {
     assert_eq!(parse_line(block), Ok(Vec::new()));
     assert_eq!(parse_line(delta), Ok(Vec::new()));
 }
+
+fn usages(fixture: &str) -> Vec<(Option<String>, u64, u64)> {
+    parse_all(fixture)
+        .into_iter()
+        .filter_map(|e| match e {
+            AgentEvent::Usage {
+                message_id,
+                input_tokens,
+                output_tokens,
+            } => Some((message_id, input_tokens, output_tokens)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn token_usage_arrives_as_the_message_starts_and_ends() {
+    let usages = usages(THINKING);
+    let first = usages.first().expect("usage at message_start");
+    assert!(first.0.as_deref().is_some_and(|id| id.starts_with("msg_")));
+    // Input counts the cached part of the prompt too.
+    assert_eq!(first.1, 2 + 13504 + 9446);
+    let last = usages.last().unwrap();
+    assert_eq!(last.0, None, "message_delta belongs to the current message");
+    assert_eq!(last.2, 75);
+}

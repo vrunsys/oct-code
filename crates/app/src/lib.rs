@@ -4,6 +4,7 @@ pub mod appearance;
 pub mod approver_mcp;
 pub mod claude_banner;
 pub mod composer;
+pub mod format;
 mod layout;
 pub mod markdown;
 pub mod theme;

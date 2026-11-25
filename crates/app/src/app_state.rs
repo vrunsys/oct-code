@@ -5,7 +5,7 @@
 //! change goes through a method that saves what changed and notifies
 //! observers; views only read.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -67,6 +67,9 @@ pub struct AppState {
     history_watch: Option<Task<()>>,
     /// Counts the times a thread's items were replaced rather than added to.
     rewrites: u64,
+    /// Sessions whose history changed while their thread was busy here; they
+    /// are read again from the start once it settles.
+    set_aside: HashSet<String>,
     /// How Claude reaches this app for approvals; supervised threads can't
     /// start without it.
     approver: Option<ApproverEndpoint>,
@@ -122,6 +125,7 @@ impl AppState {
             history_home,
             history_watch: None,
             rewrites: 0,
+            set_aside: HashSet::new(),
             approver: None,
             pending_approvals: HashMap::new(),
             approval_listener: None,
@@ -229,6 +233,9 @@ impl AppState {
                 }) else {
                     return;
                 };
+                let Ok(settled) = this.update(cx, |this, _| this.take_settled()) else {
+                    return;
+                };
                 watchers.retain(|project, _| projects.contains(project));
                 for project in projects {
                     watchers
@@ -237,6 +244,11 @@ impl AppState {
                 }
                 let (polled, changes) = cx
                     .background_spawn(async move {
+                        for watcher in watchers.values_mut() {
+                            for session_id in &settled {
+                                watcher.reread(session_id);
+                            }
+                        }
                         let changes: Vec<_> = watchers
                             .iter_mut()
                             .map(|(project, watcher)| (project.clone(), watcher.poll()))
@@ -293,6 +305,10 @@ impl AppState {
                 thread.session_id.as_deref() == Some(session.session_id.as_str())
             });
             match known {
+                // Its own stream is newer than the file Claude is writing.
+                Some(ix) if self.is_busy(ix) => {
+                    self.set_aside.insert(session.session_id);
+                }
                 Some(ix) if session.from_start => {
                     changed |= self.refresh_from_history(ix, session);
                 }
@@ -309,35 +325,50 @@ impl AppState {
         }
     }
 
-    /// Gives a thread the turns its session gained outside Agent Desk. A
-    /// thread with a turn running here is left alone: its own stream is
-    /// newer than the file Claude is still writing.
+    /// Whether a thread's session is in use here, so history must wait.
+    fn is_busy(&self, ix: usize) -> bool {
+        let thread = &self.threads[ix];
+        self.is_live(&thread.id) || thread.status == ThreadStatus::Running
+    }
+
+    /// The set-aside sessions whose threads are no longer busy.
+    fn take_settled(&mut self) -> Vec<String> {
+        let busy: HashSet<&str> = (0..self.threads.len())
+            .filter(|&ix| self.is_busy(ix))
+            .filter_map(|ix| self.threads[ix].session_id.as_deref())
+            .collect();
+        let (waiting, settled) = std::mem::take(&mut self.set_aside)
+            .into_iter()
+            .partition(|session_id| busy.contains(session_id.as_str()));
+        self.set_aside = waiting;
+        settled.into_iter().collect()
+    }
+
+    /// Gives a thread the turns its session gained outside Agent Desk.
     fn refresh_from_history(&mut self, ix: usize, session: HistorySession) -> bool {
         let thread = &self.threads[ix];
-        if self.is_live(&thread.id) || thread.status == ThreadStatus::Running {
-            return false;
-        }
         let fresh = thread_from_history(&thread.project, session);
-        // Approvals live only here; Claude's history has the rest.
-        let recorded: Vec<&Item> = thread
+        let ours: Vec<&Item> = thread
             .items
             .iter()
-            .filter(|item| !matches!(item, Item::Approval { .. }))
+            .filter(|item| is_conversation(item))
             .collect();
-        let recorded_len = recorded.len();
-        let is_extension = fresh.items.len() >= recorded_len
-            && fresh
-                .items
-                .iter()
-                .zip(recorded)
-                .all(|(new, old)| new == old);
-        if is_extension && fresh.items.len() == recorded_len {
+        let theirs: Vec<(usize, &Item)> = fresh
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| is_conversation(item))
+            .collect();
+        let is_extension = theirs.len() >= ours.len()
+            && theirs.iter().zip(&ours).all(|((_, new), old)| new == old);
+        // Where history's first item this thread lacks sits in `fresh`.
+        let first_new = theirs.get(ours.len()).map(|(position, _)| *position);
+        if is_extension && first_new.is_none() {
             return false;
         }
         let thread = &mut self.threads[ix];
-        if is_extension {
-            let added = fresh.items.into_iter().skip(recorded_len);
-            thread.items.extend(added);
+        if let Some(first_new) = first_new.filter(|_| is_extension) {
+            thread.items.extend(fresh.items.into_iter().skip(first_new));
         } else {
             // History disagrees with what is shown; it wins.
             self.rewrites += 1;
@@ -351,13 +382,8 @@ impl AppState {
     }
 
     /// Applies what a session gained since it was last read, in the time it
-    /// takes to read those lines. Skipped while a turn runs here, for the
-    /// same reason as [`Self::refresh_from_history`]; the stream has it all.
+    /// takes to read those lines.
     fn append_from_history(&mut self, ix: usize, session: HistorySession) -> bool {
-        let thread = &self.threads[ix];
-        if self.is_live(&thread.id) || thread.status == ThreadStatus::Running {
-            return false;
-        }
         let thread = &mut self.threads[ix];
         apply_history(thread, &session.entries);
         if let Some(title) = session.title.filter(|title| !title.trim().is_empty()) {
@@ -738,6 +764,12 @@ impl AppState {
             self.last_error = Some(format!("Couldn’t save “{}”: {error}", thread.title));
         }
     }
+}
+
+/// What a thread shares with Claude's history. Approvals live only here,
+/// and each side measures turn stats its own way.
+fn is_conversation(item: &Item) -> bool {
+    !matches!(item, Item::Approval { .. } | Item::Stats(_))
 }
 
 /// Folds history entries into a thread. No process is running for them, so

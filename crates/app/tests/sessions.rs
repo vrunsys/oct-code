@@ -8,7 +8,7 @@ mod support;
 
 use agent_desk::app_state::AppState;
 use agent_desk_core::store::ThreadStore;
-use agent_desk_core::thread::{Item, Thread, ThreadId, ThreadStatus};
+use agent_desk_core::thread::{Item, Thread, ThreadId, ThreadStatus, TokenCount, TurnStats};
 use agent_desk_test_support::{fake_claude_path, write_model_catalog};
 use gpui_kit::{AppContext as _, Entity, TestAppContext};
 use support::test_approver;
@@ -89,8 +89,18 @@ fn wait_for(
     }
 }
 
+/// The thread's messages and tool calls, without the per-turn stats rows.
+fn conversation(thread: &Thread) -> Vec<Item> {
+    thread
+        .items
+        .iter()
+        .filter(|item| !matches!(item, Item::Stats(_)))
+        .cloned()
+        .collect()
+}
+
 fn idle_with_items(len: usize) -> impl Fn(&Thread) -> bool {
-    move |t| t.status == ThreadStatus::Idle && t.items.len() == len
+    move |t| t.status == ThreadStatus::Idle && conversation(t).len() == len
 }
 
 fn last_assistant(thread: &Thread) -> &str {
@@ -117,7 +127,16 @@ fn send_streams_reply(cx: &mut TestAppContext) {
     let thread = wait_for(cx, &app, &id, idle_with_items(2));
     assert_eq!(
         thread.items,
-        [Item::User("hi".into()), Item::Assistant("echo: hi".into())]
+        [
+            Item::User("hi".into()),
+            Item::Assistant("echo: hi".into()),
+            // fake-claude reports a 1 ms turn costing $0.001, with no usage.
+            Item::Stats(TurnStats {
+                duration_ms: 1,
+                tokens: TokenCount::default(),
+                cost_usd: Some(0.001),
+            }),
+        ]
     );
 }
 
@@ -130,7 +149,7 @@ fn reply_is_persisted(cx: &mut TestAppContext) {
 
     let saved = ThreadStore::new(fixture.root.path().into()).load_all();
     let saved = saved.iter().find(|t| t.id == id).unwrap();
-    assert_eq!(saved.items.len(), 2);
+    assert_eq!(conversation(saved).len(), 2);
     assert_eq!(saved.session_id.as_deref(), Some("fake-session-1"));
 }
 
@@ -179,7 +198,7 @@ fn missing_project_folder_fails_cleanly(cx: &mut TestAppContext) {
         ))
     );
     // The message is kept, so nothing the user typed is lost.
-    assert_eq!(thread.items, [Item::User("hi".into())]);
+    assert_eq!(conversation(&thread), [Item::User("hi".into())]);
     assert!(!app.read_with(cx, |app, _| app.is_live(&id)));
 }
 
@@ -361,11 +380,36 @@ fn thinking_is_kept_before_the_reply(cx: &mut TestAppContext) {
     send(cx, &app, &id, "think");
     let thread = wait_for(cx, &app, &id, idle_with_items(3));
     assert_eq!(
-        thread.items,
+        conversation(&thread),
         [
             Item::User("think".into()),
             Item::Thinking("pondering".into()),
             Item::Assistant("echo: think".into())
         ]
     );
+}
+
+#[gpui_kit::test]
+fn a_running_turn_shows_its_tokens_then_records_them(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (app, id) = fixture.start(cx);
+    send(cx, &app, &id, "slow 1");
+    let used = TokenCount {
+        input: 1_200,
+        output: 40,
+    };
+    let running = wait_for(cx, &app, &id, move |t| t.turn_tokens() == used);
+    assert_eq!(running.status, ThreadStatus::Running);
+    assert!(running.turn_elapsed().is_some());
+
+    let done = wait_for(cx, &app, &id, idle_with_items(2));
+    assert_eq!(
+        done.items.last(),
+        Some(&Item::Stats(TurnStats {
+            duration_ms: 1,
+            tokens: used,
+            cost_usd: Some(0.001),
+        }))
+    );
+    assert_eq!(done.turn_elapsed(), None);
 }

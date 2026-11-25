@@ -20,6 +20,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::app_state::AppState;
+use crate::format;
 use crate::layout::content_column;
 use crate::markdown::assistant_markdown;
 
@@ -172,6 +173,11 @@ impl ThreadView {
                 self.render_message("Claude", body, false, cx)
             }
             Item::Thinking(text) => self.render_thinking(ix, text, cx),
+            Item::Stats(stats) => div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format::turn_summary(&stats))
+                .into_any_element(),
             Item::Approval {
                 request_id,
                 tool_name,

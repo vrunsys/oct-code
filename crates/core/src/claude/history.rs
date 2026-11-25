@@ -106,6 +106,12 @@ impl HistoryWatcher {
         }
     }
 
+    /// Makes the next poll report `session_id` again from the start, for a
+    /// caller that set aside what was added to it.
+    pub fn reread(&mut self, session_id: &str) {
+        self.files.remove(session_id);
+    }
+
     /// The sessions that changed since the last poll. A session's first
     /// report has all its entries ([`HistorySession::from_start`]); later
     /// ones have only the entries added since.
@@ -235,6 +241,9 @@ struct SessionReader {
     has_user_message: bool,
     /// Entries not yet reported.
     entries: Vec<HistoryEntry>,
+    /// The turn in progress: when its message was sent and when its last
+    /// line was written, in Unix milliseconds.
+    turn: Option<(Option<u64>, Option<u64>)>,
 }
 
 impl SessionReader {
@@ -252,10 +261,23 @@ impl SessionReader {
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
+            // Claude Code marks some turn ends; others end at the next message.
+            Some("system")
+                if matches!(
+                    value.get("subtype").and_then(Value::as_str),
+                    Some("turn_duration" | "stop_hook_summary")
+                ) && !is_true(&value, "isSidechain") =>
+            {
+                self.end_turn();
+            }
             Some(kind @ ("user" | "assistant")) => {
                 if is_true(&value, "isSidechain") || is_true(&value, "isMeta") {
                     return;
                 }
+                let at = value
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(parse_timestamp_ms);
                 if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
                     let ran_here = *self
                         .belongs
@@ -268,8 +290,12 @@ impl SessionReader {
                 if kind == "user"
                     && let Some(text) = user_text(&value)
                 {
+                    self.end_turn();
                     self.has_user_message = true;
                     self.entries.push(HistoryEntry::User(text));
+                    self.turn = Some((at, at));
+                } else if let Some((_, last)) = &mut self.turn {
+                    *last = at.or(*last);
                 }
                 // Tool results (user lines) and assistant text and tool calls
                 // share the stream-json shapes.
@@ -280,6 +306,53 @@ impl SessionReader {
             _ => {}
         }
     }
+}
+
+impl SessionReader {
+    /// Closes the turn in progress with how long it took. History has no
+    /// cost, so that stays unknown.
+    fn end_turn(&mut self) {
+        if let Some((started, last)) = self.turn.take() {
+            let duration_ms = started
+                .zip(last)
+                .map_or(0, |(started, last)| last.saturating_sub(started));
+            self.entries.push(HistoryEntry::Agent(AgentEvent::TurnDone {
+                is_error: false,
+                result: String::new(),
+                cost_usd: None,
+                duration_ms,
+            }));
+        }
+    }
+}
+
+/// Unix milliseconds for Claude Code's timestamps, which are always UTC in
+/// the form `2026-11-25T06:35:14.383Z`.
+pub fn parse_timestamp_ms(text: &str) -> Option<u64> {
+    let (date, time) = text.strip_suffix('Z')?.split_once('T')?;
+    let mut date = date.splitn(3, '-').map(str::parse::<i64>);
+    let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
+    let (clock, fraction) = time.split_once('.').unwrap_or((time, "0"));
+    let mut clock = clock.splitn(3, ':').map(str::parse::<i64>);
+    let (hour, minute, second) = (
+        clock.next()?.ok()?,
+        clock.next()?.ok()?,
+        clock.next()?.ok()?,
+    );
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    // Milliseconds from the first three fraction digits.
+    let millis: i64 = format!("{fraction:0<3}").get(..3)?.parse().ok()?;
+    // Days since 1970-01-01, from Howard Hinnant's days_from_civil.
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    u64::try_from(seconds * 1_000 + millis).ok()
 }
 
 /// The text the user typed, or `None` for tool results and command wrappers.

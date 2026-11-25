@@ -2,6 +2,7 @@
 //! [`AgentEvent`]s into it.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -76,6 +77,30 @@ pub enum Item {
         input: Value,
         outcome: Option<ToolOutcome>,
     },
+    /// How long a finished turn took and what it used.
+    Stats(TurnStats),
+}
+
+/// Tokens used, counting the whole prompt (cached or not) as input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCount {
+    pub input: u64,
+    pub output: u64,
+}
+
+impl std::ops::AddAssign for TokenCount {
+    fn add_assign(&mut self, other: Self) {
+        self.input += other.input;
+        self.output += other.output;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnStats {
+    pub duration_ms: u64,
+    pub tokens: TokenCount,
+    /// Known for turns run here; Claude's history doesn't record it.
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,6 +127,25 @@ pub struct Thread {
     /// Whether the last item is text or thinking Claude is still writing.
     #[serde(skip)]
     streaming: bool,
+    #[serde(skip)]
+    turn: TurnProgress,
+}
+
+/// The turn in progress. It lasts only while the turn runs, so it is
+/// neither saved nor part of a thread's equality.
+#[derive(Debug, Clone, Default)]
+struct TurnProgress {
+    started: Option<Instant>,
+    /// Tokens of the turn's finished model calls.
+    counted: TokenCount,
+    /// The model call still running, with its id.
+    call: Option<(Option<String>, TokenCount)>,
+}
+
+impl PartialEq for TurnProgress {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Thread {
@@ -119,6 +163,42 @@ impl Thread {
             effort: None,
             permission_mode: PermissionMode::default(),
             streaming: false,
+            turn: TurnProgress::default(),
+        }
+    }
+
+    /// How long the turn in progress has run; `None` between turns.
+    pub fn turn_elapsed(&self) -> Option<Duration> {
+        self.turn.started.map(|started| started.elapsed())
+    }
+
+    fn end_turn(&mut self) {
+        self.turn = TurnProgress::default();
+    }
+
+    /// Tokens the turn in progress has used so far.
+    pub fn turn_tokens(&self) -> TokenCount {
+        let mut tokens = self.turn.counted;
+        if let Some((_, call)) = self.turn.call {
+            tokens += call;
+        }
+        tokens
+    }
+
+    /// A model call reports running totals several times; a report with a
+    /// new id starts the next call.
+    fn count_usage(&mut self, message_id: &Option<String>, tokens: TokenCount) {
+        match &mut self.turn.call {
+            Some((id, call)) if message_id.is_none() || id == message_id => {
+                call.input = call.input.max(tokens.input);
+                call.output = call.output.max(tokens.output);
+            }
+            _ => {
+                if let Some((_, finished)) = self.turn.call.take() {
+                    self.turn.counted += finished;
+                }
+                self.turn.call = Some((message_id.clone(), tokens));
+            }
         }
     }
 
@@ -132,6 +212,10 @@ impl Thread {
             }
         }
         self.items.push(Item::User(text.to_owned()));
+        self.turn = TurnProgress {
+            started: Some(Instant::now()),
+            ..TurnProgress::default()
+        };
         self.status = ThreadStatus::Running;
         self.streaming = false;
     }
@@ -166,13 +250,30 @@ impl Thread {
                     });
                 }
             }
+            AgentEvent::Usage {
+                message_id,
+                input_tokens,
+                output_tokens,
+            } => self.count_usage(
+                message_id,
+                TokenCount {
+                    input: *input_tokens,
+                    output: *output_tokens,
+                },
+            ),
             AgentEvent::TurnDone {
                 is_error,
                 result,
                 cost_usd,
-                ..
+                duration_ms,
             } => {
-                self.streaming = false;
+                let tokens = self.turn_tokens();
+                self.end_turn();
+                self.push_finished(Item::Stats(TurnStats {
+                    duration_ms: *duration_ms,
+                    tokens,
+                    cost_usd: *cost_usd,
+                }));
                 self.cost_usd += cost_usd.unwrap_or(0.0);
                 self.status = if *is_error {
                     ThreadStatus::Failed(result.clone())
@@ -266,6 +367,7 @@ impl Thread {
     /// The agent process ended. Only an exit in the middle of a turn is a failure.
     pub fn on_exit(&mut self, code: Option<i32>, stderr_tail: &str) {
         self.streaming = false;
+        self.end_turn();
         if self.status != ThreadStatus::Running {
             return;
         }

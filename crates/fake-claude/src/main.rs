@@ -59,6 +59,26 @@ fn main() -> ExitCode {
                 &json!({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "pondering", "signature": "x"}]}}),
             );
         }
+        if text.starts_with("slow") {
+            // A model call that reports usage, then takes a while: 1200
+            // prompt tokens (1000 from the cache) and 40 written.
+            emit(
+                &mut out,
+                &json!({"type": "stream_event", "event": {"type": "message_start", "message": {
+                        "id": "msg_fake", "usage": {"input_tokens": 200,
+                        "cache_read_input_tokens": 1000, "output_tokens": 1}}}}),
+            );
+            emit(
+                &mut out,
+                &json!({"type": "stream_event", "event": {"type": "message_delta",
+                        "usage": {"output_tokens": 40}}}),
+            );
+            let seconds = text
+                .strip_prefix("slow ")
+                .and_then(|seconds| seconds.parse().ok())
+                .unwrap_or(1);
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+        }
         if streams {
             // Like Claude Code: the text in pieces, then the whole block.
             let mid = reply

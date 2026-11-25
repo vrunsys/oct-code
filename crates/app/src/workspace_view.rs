@@ -5,6 +5,7 @@
 //! Domain data lives in [`AppState`]; this view keeps only transient UI state.
 
 use std::path::Path;
+use std::time::Duration;
 
 use agent_desk_core::detect::AgentStatus;
 use agent_desk_core::settings::Appearance;
@@ -21,7 +22,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    SharedString, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
+    SharedString, Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _,
 };
 
 use crate::actions::{AddProject, NewThread, StopThread, ToggleAppearance, WORKSPACE_CONTEXT};
@@ -29,6 +30,7 @@ use crate::app_state::AppState;
 use crate::appearance::apply_appearance;
 use crate::claude_banner::ClaudeBanner;
 use crate::composer::Composer;
+use crate::format;
 use crate::layout::content_column;
 use crate::thread_view::ThreadView;
 
@@ -43,6 +45,9 @@ pub struct WorkspaceView {
     /// The appearance last applied to the window, to apply only on change.
     applied_appearance: Appearance,
     focus_handle: FocusHandle,
+    /// Re-renders each second while the selected thread works, so its
+    /// elapsed time counts up.
+    ticker: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -84,6 +89,7 @@ impl WorkspaceView {
             appearance_override,
             applied_appearance,
             focus_handle,
+            ticker: None,
             _subscriptions: subscriptions,
         }
     }
@@ -325,6 +331,21 @@ impl WorkspaceView {
         self.choose_appearance(next, window, cx);
     }
 
+    fn tick_while(&mut self, working: bool, cx: &mut Context<Self>) {
+        if !working {
+            self.ticker = None;
+        } else if self.ticker.is_none() {
+            self.ticker = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        return;
+                    }
+                }
+            }));
+        }
+    }
+
     fn render_thread_header(&self, thread: &Thread, cx: &mut Context<Self>) -> AnyElement {
         let app = self.app.read(cx);
         let project_name = app
@@ -365,7 +386,10 @@ impl WorkspaceView {
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .child(Spinner::new().xsmall())
-                                .child("Working"),
+                                .child(format::turn_progress(
+                                    thread.turn_elapsed().map_or(0, |elapsed| elapsed.as_secs()),
+                                    thread.turn_tokens(),
+                                )),
                         )
                     })
                     .when(is_stoppable, |this| {
@@ -456,6 +480,12 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let working = self
+            .app
+            .read(cx)
+            .selected_thread()
+            .is_some_and(|thread| thread.status == ThreadStatus::Running);
+        self.tick_while(working, cx);
         let theme = cx.theme();
         h_flex()
             .id("workspace")

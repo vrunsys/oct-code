@@ -45,6 +45,16 @@ pub enum AgentEvent {
         content: String,
         is_error: bool,
     },
+    /// Tokens one model call has used so far. A call reports several times
+    /// as it runs, each with its running totals; `message_id` is `None` for
+    /// a report on the call in progress.
+    Usage {
+        message_id: Option<String>,
+        /// The whole prompt, including the part read from or written to
+        /// the cache.
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     TurnDone {
         is_error: bool,
         result: String,
@@ -106,6 +116,7 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>, ParseError> {
                     }),
                 _ => None,
             })
+            .chain(usage(value.get("message"), value.pointer("/message/usage")).map(Ok))
             .collect(),
         "user" => content_blocks(&value)?
             .iter()
@@ -114,7 +125,10 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>, ParseError> {
             .collect(),
         // Sent with `--include-partial-messages`. Text and thinking are shown
         // as they arrive; tool calls wait for their finished block.
-        "stream_event" => Ok(stream_delta(&value).into_iter().collect()),
+        "stream_event" => Ok(stream_delta(&value)
+            .or_else(|| stream_usage(&value))
+            .into_iter()
+            .collect()),
         "result" => Ok(vec![AgentEvent::TurnDone {
             is_error: value
                 .get("is_error")
@@ -149,6 +163,30 @@ fn stream_delta(value: &Value) -> Option<AgentEvent> {
         _ => return None,
     };
     (!text.is_empty()).then(|| event(text.to_owned()))
+}
+
+/// Usage reported as a model call starts (with its id) or ends (without).
+fn stream_usage(value: &Value) -> Option<AgentEvent> {
+    let event = value.get("event")?;
+    match str_field(event, "type")? {
+        "message_start" => usage(event.get("message"), event.pointer("/message/usage")),
+        "message_delta" => usage(None, event.get("usage")),
+        _ => None,
+    }
+}
+
+fn usage(message: Option<&Value>, usage: Option<&Value>) -> Option<AgentEvent> {
+    let usage = usage?;
+    let count = |key| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    Some(AgentEvent::Usage {
+        message_id: message
+            .and_then(|message| str_field(message, "id"))
+            .map(str::to_owned),
+        input_tokens: count("input_tokens")
+            + count("cache_creation_input_tokens")
+            + count("cache_read_input_tokens"),
+        output_tokens: count("output_tokens"),
+    })
 }
 
 fn parse_tool_use(block: &Value) -> Result<AgentEvent, ParseError> {
