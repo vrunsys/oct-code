@@ -205,8 +205,77 @@ fn a_watcher_reports_a_session_again_only_after_its_file_changes() {
 
     let changed = watcher.poll();
     assert_eq!(changed.len(), 1);
-    assert_eq!(changed[0].entries.len(), 2);
+    assert!(!changed[0].from_start, "only what was added");
+    assert_eq!(
+        changed[0].entries,
+        [HistoryEntry::Agent(AgentEvent::AssistantText {
+            text: "two".into()
+        })]
+    );
     assert!(watcher.poll().is_empty());
+}
+
+fn append(history: &History, text: &str) {
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(history.dir().join(format!("{ID}.jsonl")))
+        .unwrap();
+    std::io::Write::write_all(&mut file, text.as_bytes()).unwrap();
+}
+
+#[test]
+fn a_watcher_reports_everything_first_then_only_new_lines() {
+    let history = History::new();
+    history.write(&format!("{ID}.jsonl"), &[history.user("one")]);
+    let mut watcher = HistoryWatcher::new(history.home.path(), &history.project);
+    let first = watcher.poll();
+    assert!(first[0].from_start);
+    assert_eq!(first[0].entries, [HistoryEntry::User("one".into())]);
+
+    append(&history, &format!("{}\n", history.user("two")));
+    let next = watcher.poll();
+    assert!(!next[0].from_start);
+    assert_eq!(next[0].entries, [HistoryEntry::User("two".into())]);
+}
+
+#[test]
+fn a_line_still_being_written_waits_for_its_end() {
+    let history = History::new();
+    history.write(&format!("{ID}.jsonl"), &[history.user("one")]);
+    let mut watcher = HistoryWatcher::new(history.home.path(), &history.project);
+    watcher.poll();
+
+    let line = format!("{}\n", history.user("two"));
+    let (head, tail) = line.split_at(line.len() / 2);
+    append(&history, head);
+    assert!(
+        watcher
+            .poll()
+            .iter()
+            .all(|session| session.entries.is_empty()),
+        "half a line is not an entry"
+    );
+    append(&history, tail);
+    assert_eq!(
+        watcher.poll()[0].entries,
+        [HistoryEntry::User("two".into())]
+    );
+}
+
+#[test]
+fn a_file_that_shrank_is_read_again_from_the_start() {
+    let history = History::new();
+    history.write(
+        &format!("{ID}.jsonl"),
+        &[history.user("one"), history.user("two")],
+    );
+    let mut watcher = HistoryWatcher::new(history.home.path(), &history.project);
+    watcher.poll();
+
+    history.write(&format!("{ID}.jsonl"), &[history.user("new")]);
+    let again = watcher.poll();
+    assert!(again[0].from_start);
+    assert_eq!(again[0].entries, [HistoryEntry::User("new".into())]);
 }
 
 #[test]

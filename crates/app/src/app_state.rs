@@ -32,7 +32,7 @@ const DEFAULT_CLAUDE_BINARY: &str = "claude";
 
 /// How often Claude Code's history is checked for turns and sessions added
 /// outside Agent Desk. A check only reads the files that changed.
-const HISTORY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const HISTORY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Approval requests from the server, each with its reply.
 pub type ApprovalRequests = async_channel::Receiver<(ApprovalRequest, ApprovalReply)>;
@@ -293,7 +293,10 @@ impl AppState {
                 thread.session_id.as_deref() == Some(session.session_id.as_str())
             });
             match known {
-                Some(ix) => changed |= self.refresh_from_history(ix, session),
+                Some(ix) if session.from_start => {
+                    changed |= self.refresh_from_history(ix, session);
+                }
+                Some(ix) => changed |= self.append_from_history(ix, session),
                 None => {
                     self.threads.push(thread_from_history(project, session));
                     self.save_thread(self.threads.len() - 1);
@@ -343,6 +346,23 @@ impl AppState {
         thread.title = fresh.title;
         // Newer turns supersede how the last one here ended.
         thread.status = fresh.status;
+        self.save_thread(ix);
+        true
+    }
+
+    /// Applies what a session gained since it was last read, in the time it
+    /// takes to read those lines. Skipped while a turn runs here, for the
+    /// same reason as [`Self::refresh_from_history`]; the stream has it all.
+    fn append_from_history(&mut self, ix: usize, session: HistorySession) -> bool {
+        let thread = &self.threads[ix];
+        if self.is_live(&thread.id) || thread.status == ThreadStatus::Running {
+            return false;
+        }
+        let thread = &mut self.threads[ix];
+        apply_history(thread, &session.entries);
+        if let Some(title) = session.title.filter(|title| !title.trim().is_empty()) {
+            thread.title = title;
+        }
         self.save_thread(ix);
         true
     }
@@ -720,17 +740,22 @@ impl AppState {
     }
 }
 
-/// A thread holding a past session's conversation, ready to resume it.
-fn thread_from_history(project: &Path, session: HistorySession) -> Thread {
-    let mut thread = Thread::new(project.to_path_buf());
-    for entry in &session.entries {
+/// Folds history entries into a thread. No process is running for them, so
+/// the thread ends idle.
+fn apply_history(thread: &mut Thread, entries: &[HistoryEntry]) {
+    for entry in entries {
         match entry {
             HistoryEntry::User(text) => thread.push_user(text),
             HistoryEntry::Agent(event) => thread.apply(event),
         }
     }
-    // History has no turn results, and no process is running for it.
     thread.status = ThreadStatus::Idle;
+}
+
+/// A thread holding a past session's conversation, ready to resume it.
+fn thread_from_history(project: &Path, session: HistorySession) -> Thread {
+    let mut thread = Thread::new(project.to_path_buf());
+    apply_history(&mut thread, &session.entries);
     thread.session_id = Some(session.session_id);
     thread.created_at = session.modified_ms;
     if let Some(title) = session.title.filter(|title| !title.trim().is_empty()) {
