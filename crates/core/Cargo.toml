@@ -1,0 +1,22 @@
+[package]
+name = "agent_desk_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-channel = "2.5.0"
+dirs = "7.0.0"
+dunce = "1.0.5"
+interprocess = "2.4.9"
+log = "0.4.35"
+serde.workspace = true
+serde_json.workspace = true
+smol = "2.0.2"
+uuid = { version = "1.29.3", features = ["v4"] }
+which = "8.0.6"
+
+[dev-dependencies]
+agent_desk_test_support = { path = "../test-support" }
+serde_json.workspace = true
+tempfile = "3.27.0"

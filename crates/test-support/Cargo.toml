@@ -1,0 +1,12 @@
+[package]
+name = "agent_desk_test_support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Test-only helpers shared by the Agent Desk crates."
+
+[dependencies]
+escargot = "1.0.1"
+serde_json.workspace = true
+smol = "2.0.2"

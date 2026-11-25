@@ -1,0 +1,12 @@
+pub mod actions;
+pub mod app_state;
+pub mod appearance;
+pub mod approver_mcp;
+pub mod claude_banner;
+pub mod composer;
+pub mod format;
+mod layout;
+pub mod markdown;
+pub mod theme;
+pub mod thread_view;
+pub mod workspace_view;

@@ -1,0 +1,114 @@
+{
+  "$schema": "https://github.com/longbridge/gpui-kit/raw/refs/heads/main/.theme-schema.json",
+  "name": "Agent Desk",
+  "author": "Agent Desk",
+  "_palette": "Brand: ink #212121 (primary), coral #FF7759 (accent), paper #FAFAFA. Neutrals between ink and paper are derived. Corners are square: radius 0 everywhere. Coral never carries text: on paper it is about 2.4:1.",
+  "themes": [
+    {
+      "is_default": true,
+      "name": "Agent Desk Light",
+      "mode": "light",
+      "radius": 0,
+      "radius.lg": 0,
+      "colors": {
+        "background": "#FAFAFA",
+        "foreground": "#212121",
+        "border": "#E4E4E4",
+        "input.border": "#DADADA",
+        "ring": "#FF7759",
+        "caret": "#FF7759",
+        "selection.background": "#FF775940",
+
+        "primary.background": "#212121",
+        "primary.foreground": "#FAFAFA",
+        "primary.hover.background": "#3A3A3A",
+        "primary.active.background": "#111111",
+
+        "secondary.background": "#EFEFEF",
+        "secondary.foreground": "#212121",
+        "secondary.hover.background": "#E6E6E6",
+        "secondary.active.background": "#DCDCDC",
+
+        "accent.background": "#EFEFEF",
+        "accent.foreground": "#212121",
+        "muted.background": "#F0F0F0",
+        "muted.foreground": "#666666",
+
+        "popover.background": "#FFFFFF",
+        "popover.foreground": "#212121",
+        "list.background": "#FAFAFA",
+        "list.hover.background": "#F0F0F0",
+        "list.active.background": "#FF775926",
+        "list.active.border": "#FF7759",
+
+        "sidebar.background": "#F3F3F3",
+        "sidebar.foreground": "#212121",
+        "sidebar.border": "#E4E4E4",
+        "sidebar.accent.background": "#E6E6E6",
+        "sidebar.accent.foreground": "#212121",
+        "sidebar.primary.background": "#212121",
+        "sidebar.primary.foreground": "#FAFAFA",
+
+        "link.foreground": "#212121",
+        "link.hover.foreground": "#444444",
+        "link.active.foreground": "#212121",
+        "title_bar.background": "#F3F3F3",
+        "title_bar.border": "#E4E4E4",
+        "window.border": "#E4E4E4"
+      }
+    },
+    {
+      "is_default": true,
+      "name": "Agent Desk Dark",
+      "mode": "dark",
+      "radius": 0,
+      "radius.lg": 0,
+      "colors": {
+        "background": "#212121",
+        "foreground": "#FAFAFA",
+        "border": "#333333",
+        "input.border": "#3A3A3A",
+        "ring": "#FF7759",
+        "caret": "#FF7759",
+        "selection.background": "#FF775955",
+
+        "primary.background": "#FAFAFA",
+        "primary.foreground": "#212121",
+        "primary.hover.background": "#E2E2E2",
+        "primary.active.background": "#CFCFCF",
+
+        "secondary.background": "#2C2C2C",
+        "secondary.foreground": "#FAFAFA",
+        "secondary.hover.background": "#353535",
+        "secondary.active.background": "#3E3E3E",
+
+        "accent.background": "#2C2C2C",
+        "accent.foreground": "#FAFAFA",
+        "muted.background": "#2A2A2A",
+        "muted.foreground": "#A3A3A3",
+
+        "popover.background": "#292929",
+        "popover.foreground": "#FAFAFA",
+        "list.background": "#212121",
+        "list.hover.background": "#2A2A2A",
+        "list.active.background": "#FF775933",
+        "list.active.border": "#FF7759",
+
+        "sidebar.background": "#1A1A1A",
+        "sidebar.foreground": "#FAFAFA",
+        "sidebar.border": "#2E2E2E",
+        "sidebar.accent.background": "#2C2C2C",
+        "sidebar.accent.foreground": "#FAFAFA",
+        "sidebar.primary.background": "#FAFAFA",
+        "sidebar.primary.foreground": "#212121",
+
+        "link.foreground": "#FAFAFA",
+        "link.hover.foreground": "#D4D4D4",
+        "link.active.foreground": "#FAFAFA",
+        "title_bar.background": "#1A1A1A",
+        "title_bar.border": "#2E2E2E",
+        "window.border": "#2E2E2E"
+      }
+    }
+  ]
+}
