@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use agent_desk::actions;
 use agent_desk::app_state::AppState;
 use agent_desk::appearance::appearance_from_env;
 use agent_desk::workspace_view::WorkspaceView;
+use agent_desk::{actions, theme};
 use agent_desk_core::store::default_root;
 use gpui_kit::{AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
@@ -21,6 +21,7 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            theme::install(cx);
             actions::bind_keys(cx);
 
             // Window geometry is a platform boundary, so pixels are correct here.

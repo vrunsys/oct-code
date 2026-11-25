@@ -16,6 +16,7 @@ use gpui_kit::{
 
 fn open_workspace(root: &Path, cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<AppState>) {
     cx.update(gpui_kit::init);
+    cx.update(agent_desk::theme::install);
     cx.update(agent_desk::actions::bind_keys);
     let root = root.to_path_buf();
     let missing_claude = root.join("no-claude-here");
@@ -156,6 +157,7 @@ fn stop_shortcut_ends_the_live_session(cx: &mut TestAppContext) {
         .path;
 
     cx.update(gpui_kit::init);
+    cx.update(agent_desk::theme::install);
     cx.update(agent_desk::actions::bind_keys);
     let app = cx.new(|_| AppState::load(root.path().into(), Some(fake_claude_path())));
     let window_app = app.clone();
