@@ -150,6 +150,10 @@ impl ThreadView {
             }
         }
         self.shown = next;
+        // Turns start and end through app changes, so this is where the
+        // clock starts and stops; drawing never changes state.
+        let is_working = self.progress(cx).is_some();
+        self.tick_while(is_working, cx);
         cx.notify();
     }
 
@@ -622,7 +626,6 @@ impl ThreadView {
 impl Render for ThreadView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let progress = self.progress(cx);
-        self.tick_while(progress.is_some(), cx);
         let is_empty = self.shown.as_ref().is_none_or(|(_, len)| *len == 0);
         if is_empty {
             return v_flex()
